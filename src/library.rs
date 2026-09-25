@@ -14,6 +14,8 @@ use std::{
 };
 
 const ZSTD_LEVEL: i32 = 7;
+const SMALL_ZSTD_LEVEL: i32 = 19;
+const SMALL_GMA_MAX_BYTES: u64 = 64 * 1024 * 1024;
 const MARKER: &str = "gmm.json";
 
 #[derive(Clone, Debug)]
@@ -150,8 +152,14 @@ pub struct LibraryEntry {
     pub time_updated: u64,
     pub raw_size: u64,
     pub stored_size: u64,
+    /// Old index files default to false, so they can be optimized on demand.
+    #[serde(default)]
+    pub optimized: bool,
 }
 
+pub fn can_optimize(entry: &LibraryEntry) -> bool {
+    !entry.optimized && entry.raw_size > 0 && entry.raw_size <= SMALL_GMA_MAX_BYTES
+}
 pub struct Library {
     pub root: PathBuf,
     pub entries: BTreeMap<String, LibraryEntry>,
@@ -199,6 +207,17 @@ impl<W: Write> Write for GmaCheck<W> {
     fn flush(&mut self) -> io::Result<()> {
         self.inner.flush()
     }
+}
+
+fn encoder<W: Write>(out: W, level: i32) -> Result<zstd::Encoder<'static, W>, String> {
+    let mut encoder = zstd::Encoder::new(out, level).map_err(|e| e.to_string())?;
+    let workers = std::thread::available_parallelism()
+        .map(|n| n.get().min(4) as u32)
+        .unwrap_or(1);
+    if workers > 1 {
+        encoder.multithread(workers).map_err(|e| e.to_string())?;
+    }
+    Ok(encoder)
 }
 
 fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
@@ -284,6 +303,7 @@ impl Library {
         if !numeric(&copy.id) {
             return Err(format!("Invalid Workshop ID: {}", copy.id));
         }
+        let optimized = !copy.legacy && copy.size <= SMALL_GMA_MAX_BYTES;
         let target = self.file(&copy.id);
         let tmp = target.with_extension("zst.tmp");
         let result = (|| -> Result<(u64, u64), String> {
@@ -295,15 +315,13 @@ impl Library {
                 progress,
             });
             let out = BufWriter::new(fs::File::create(&tmp).map_err(|e| e.to_string())?);
-            let mut encoder = zstd::Encoder::new(out, ZSTD_LEVEL).map_err(|e| e.to_string())?;
-            let workers = std::thread::available_parallelism()
-                .map(|n| n.get().min(4) as u32)
-                .unwrap_or(1);
-            if workers > 1 {
-                let _ = encoder.multithread(workers);
-            }
+            let level = if optimized {
+                SMALL_ZSTD_LEVEL
+            } else {
+                ZSTD_LEVEL
+            };
             let mut check = GmaCheck {
-                inner: encoder,
+                inner: encoder(out, level)?,
                 count: 0,
                 head: Vec::with_capacity(4),
             };
@@ -344,9 +362,64 @@ impl Library {
                 time_updated: copy.time_updated,
                 raw_size,
                 stored_size,
+                optimized,
             },
         );
         self.save_index()
+    }
+    /// Recompress an older library copy without needing the Steam download. Keep the original
+    /// until a complete replacement is smaller; interrupted runs leave it readable.
+    pub fn optimize(&mut self, id: &str, progress: &mut dyn FnMut(u64)) -> Result<u64, String> {
+        let entry = self.entries.get(id).ok_or("Mod is not in the library.")?;
+        if !can_optimize(entry) {
+            return Ok(0);
+        }
+        let raw_size = entry.raw_size;
+        let target = self.file(id);
+        let previous = fs::metadata(&target).map_err(|e| e.to_string())?.len();
+        let tmp = target.with_extension("zst.tmp");
+        let result = (|| -> Result<u64, String> {
+            let file = fs::File::open(&target).map_err(|e| e.to_string())?;
+            let decoder = zstd::Decoder::new(file).map_err(|e| e.to_string())?;
+            let out = BufWriter::new(fs::File::create(&tmp).map_err(|e| e.to_string())?);
+            let mut encoder = encoder(out, SMALL_ZSTD_LEVEL)?;
+            let mut reader = Counting {
+                inner: decoder,
+                count: 0,
+                progress,
+            };
+            io::copy(&mut reader, &mut encoder).map_err(|e| e.to_string())?;
+            if reader.count != raw_size {
+                return Err("Library copy changed size while optimizing.".into());
+            }
+            let mut out = encoder.finish().map_err(|e| e.to_string())?;
+            out.flush().map_err(|e| e.to_string())?;
+            out.into_inner()
+                .map_err(|e| e.to_string())?
+                .sync_all()
+                .map_err(|e| e.to_string())?;
+            Ok(fs::metadata(&tmp).map_err(|e| e.to_string())?.len())
+        })();
+        let stored = match result {
+            Ok(stored) => stored,
+            Err(error) => {
+                let _ = fs::remove_file(&tmp);
+                return Err(error);
+            }
+        };
+        if stored < previous {
+            if let Err(error) = fs::rename(&tmp, &target) {
+                let _ = fs::remove_file(&tmp);
+                return Err(error.to_string());
+            }
+        } else {
+            fs::remove_file(&tmp).map_err(|e| e.to_string())?;
+        }
+        let entry = self.entries.get_mut(id).expect("Checked above");
+        entry.stored_size = stored.min(previous);
+        entry.optimized = true;
+        self.save_index()?;
+        Ok(previous.saturating_sub(stored))
     }
 
     pub fn remove(&mut self, id: &str) -> Result<(), String> {
@@ -842,6 +915,73 @@ mod tests {
         uninstall(&game, "100").unwrap();
         assert!(!game.join("addons/gmm_100").exists());
         assert!(!installed_copies(&game).contains_key("100"));
+    }
+
+    #[test]
+    fn optimizes_old_library_copy_without_losing_addon_files() {
+        let temp = tempfile::tempdir().unwrap();
+        let game = temp.path().join("garrysmod");
+        let mut library = Library::open(&temp.path().join("library")).unwrap();
+        let mut seed = vec![0; 3 * 1024 * 1024];
+        let mut state = 1u64;
+        for chunk in seed.chunks_mut(8) {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            chunk.copy_from_slice(&state.to_le_bytes()[..chunk.len()]);
+        }
+        let mut body = seed.clone();
+        body.extend_from_slice(&seed);
+        let bytes = gma(&[("materials/repeated.bin", &body)]);
+        let old = zstd::encode_all(bytes.as_slice(), ZSTD_LEVEL).unwrap();
+        fs::write(library.file("100"), &old).unwrap();
+        // A pre-update index has no `optimized` field.
+        fs::write(
+            library.root.join("index.json"),
+            format!(
+                r#"{{"100":{{"title":"Repetitions","timeUpdated":10,"rawSize":{},"storedSize":{}}}}}"#,
+                bytes.len(),
+                old.len()
+            ),
+        )
+        .unwrap();
+        let mut library = Library::open(&library.root).unwrap();
+        assert!(can_optimize(&library.entries["100"]));
+        let saved = library.optimize("100", &mut |_| {}).unwrap();
+        assert!(
+            saved > 100_000,
+            "strong compression should reduce this archive"
+        );
+        assert_eq!(library.entries["100"].stored_size, old.len() as u64 - saved);
+        assert!(library.entries["100"].optimized);
+        assert_eq!(library.optimize("100", &mut |_| {}).unwrap(), 0);
+        let library = Library::open(&library.root).unwrap();
+        assert!(!can_optimize(&library.entries["100"]));
+        install(&library, "100", &game, &mut |_| {}).unwrap();
+        assert_eq!(
+            fs::read(game.join("addons/gmm_100/materials/repeated.bin")).unwrap(),
+            body
+        );
+    }
+
+    #[test]
+    fn failed_optimization_preserves_original_library_copy() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut library = Library::open(&temp.path().join("library")).unwrap();
+        let original = b"invalid zstd frame";
+        fs::write(library.file("100"), original).unwrap();
+        library.entries.insert(
+            "100".into(),
+            LibraryEntry {
+                raw_size: 100,
+                stored_size: original.len() as u64,
+                ..Default::default()
+            },
+        );
+        assert!(library.optimize("100", &mut |_| {}).is_err());
+        assert_eq!(fs::read(library.file("100")).unwrap(), original);
+        assert!(!library.file("100").with_extension("zst.tmp").exists());
+        assert!(!library.entries["100"].optimized);
     }
 
     #[test]

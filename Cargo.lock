@@ -1148,7 +1148,7 @@ dependencies = [
 
 [[package]]
 name = "gmod-manager"
-version = "0.6.10"
+version = "0.6.11"
 dependencies = [
  "eframe",
  "image",

@@ -27,7 +27,7 @@ You need Steam and Garry's Mod installed. The app updates itself.
 
 ## Library
 
-Turn it on in **Library**. It keeps a compressed copy of every mod, so switching presets doesn't mean downloading everything again. Mods you aren't using get removed from Steam, and they come back from the library when you need them.
+Turn it on in **Library**. It keeps a compressed copy of every mod, so switching presets doesn't mean downloading everything again. Mods you aren't using get removed from Steam, and they come back from the library when you need them. New copies under 64 MB use stronger compression; saving them can take longer. **Optimize stored mods** can shrink older library copies without downloading them again and only replaces an archive if the result is smaller. Larger mods keep the faster compression mode to limit memory and CPU use.
 
 In GMod, these mods show up under **Addons → GMod Manager** instead of **Subscribed**.
 
@@ -43,7 +43,3 @@ cargo test
 ```
 
 To publish an update, bump `version` in `Cargo.toml`, commit, and run `.\release.ps1`.
-
-## Intro video
-
-`.\promo\render.ps1` films the app and renders the intro for the version in `Cargo.toml`, with that version in the corner. It records a sandboxed copy in `C:\GModManagerDemo` with public Workshop collections, off screen, so none of your presets or files appear and you can keep using the PC. Edit the narration and captions in `promo/script.json`; `-SkipCapture` re-renders without filming again. The voice is a Microsoft neural voice via `edge-tts`; the sounds are CC0 from Kenney (`promo/public/sfx`).

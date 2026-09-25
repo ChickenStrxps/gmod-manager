@@ -928,6 +928,31 @@ impl App {
         });
     }
 
+    fn start_optimize_library(&mut self, ctx: &egui::Context) {
+        let root = self.library_root();
+        self.spawn_job(ctx, JobKind::Store, "Optimizing library", move |progress| {
+            let mut library = Library::open(&root)?;
+            let ids: Vec<String> = library
+                .entries
+                .iter()
+                .filter(|(_, entry)| library::can_optimize(entry))
+                .map(|(id, _)| id.clone())
+                .collect();
+            let mut saved = 0;
+            for (index, id) in ids.iter().enumerate() {
+                let raw_size = library.entries[id].raw_size.max(1);
+                let label = format!("Optimizing mod {}/{}", index + 1, ids.len());
+                saved += library.optimize(id, &mut |done| {
+                    progress(&label, done as f32 / raw_size as f32)
+                })?;
+            }
+            Ok(format!(
+                "Library optimization saved {}.",
+                format_size(saved)
+            ))
+        });
+    }
+
     fn change_library_folder(&mut self, ctx: &egui::Context) {
         let Some(target) = rfd::FileDialog::new()
             .set_title("Choose a folder for the mod library")
@@ -3270,6 +3295,16 @@ impl App {
             .clicked()
         {
             self.start_store_all(ctx);
+        }
+        if ui
+            .add_enabled(
+                !self.busy() && self.library.values().any(library::can_optimize),
+                soft_button("Optimize stored mods"),
+            )
+            .on_hover_text("Recompress older stored mods under 64 MB without downloading them again. This can take a while; original copies are kept unless the result is smaller.")
+            .clicked()
+        {
+            self.start_optimize_library(ctx);
         }
         ui.add_space(14.0);
         ui.painter().hline(
