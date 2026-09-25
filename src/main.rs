@@ -217,19 +217,6 @@ struct App {
     authors: HashMap<String, String>,
     authors_rx: Option<Receiver<HashMap<String, String>>>,
     authors_requested: HashSet<String>,
-    add_rx: Option<
-        Receiver<
-            Result<
-                (
-                    String,
-                    core::WorkshopSearchItem,
-                    Vec<WorkshopItem>,
-                    HashMap<String, ItemMeta>,
-                ),
-                String,
-            >,
-        >,
-    >,
     requirements: Option<RequirementsJob>,
     requirements_attempted: HashMap<String, Vec<String>>,
     requirements_error: Option<(String, String)>,
@@ -294,7 +281,6 @@ impl App {
             authors: workshop::load_authors(&dir),
             authors_rx: None,
             authors_requested: HashSet::new(),
-            add_rx: None,
             requirements: None,
             requirements_attempted: HashMap::new(),
             requirements_error: None,
@@ -361,7 +347,7 @@ impl App {
     }
 
     fn busy(&self) -> bool {
-        self.job.is_some() || self.add_rx.is_some() || self.requirements.is_some()
+        self.job.is_some() || self.requirements.is_some()
     }
 
     fn notify(&mut self, ctx: &egui::Context, result: Result<String, String>) {
@@ -932,7 +918,7 @@ impl App {
     }
 
     fn start_requirements(&mut self, ctx: &egui::Context, manual: bool) {
-        if self.requirements.is_some() || self.add_rx.is_some() || self.job.is_some() {
+        if self.requirements.is_some() || self.job.is_some() {
             return;
         }
         let profile = self.profile();
@@ -1000,35 +986,36 @@ impl App {
         }
         let Some(result) = finished else { return };
         let job = self.requirements.take().unwrap();
+        let Some(index) = self.profiles.iter().position(|p| p.id == job.profile_id) else {
+            return;
+        };
+        if !self.profiles[index].sync.addons {
+            self.requirements_attempted.remove(&job.profile_id);
+            return;
+        }
+        let mut current: Vec<String> = self.profiles[index]
+            .workshop
+            .items
+            .iter()
+            .filter(|item| item.available)
+            .map(|item| item.id.clone())
+            .collect();
+        current.sort();
+        current.dedup();
+        if current != job.roots {
+            return; // Preset changed while checking; the next frame scans the new set.
+        }
         match result {
             Err(error) => {
                 self.requirements_error = Some((job.profile_id, error.clone()));
                 self.notify(ctx, Err(error));
             }
             Ok((ids, meta)) => {
-                let Some(index) = self.profiles.iter().position(|p| p.id == job.profile_id) else {
-                    return;
-                };
-                if !self.profiles[index].sync.addons {
-                    self.requirements_attempted.remove(&job.profile_id);
-                    return;
-                }
-                let mut current: Vec<String> = self.profiles[index]
-                    .workshop
-                    .items
-                    .iter()
-                    .filter(|item| item.available)
-                    .map(|item| item.id.clone())
-                    .collect();
-                current.sort();
-                current.dedup();
-                if current != job.roots {
-                    return; // Preset changed while checking; the next frame scans the new set.
-                }
                 self.meta
                     .extend(meta.iter().map(|(id, item)| (id.clone(), item.clone())));
                 let _ = workshop::save_meta(&self.dir, &self.meta);
-                let profile = &mut self.profiles[index];
+                let mut updated = self.profiles[index].clone();
+                let profile = &mut updated;
                 let mut present: HashSet<String> = profile
                     .workshop
                     .items
@@ -1055,7 +1042,6 @@ impl App {
                         added += 1;
                     }
                 }
-                let saved = (added > 0).then(|| core::save_profile(&self.dir, profile));
                 let mut checked: Vec<String> = profile
                     .workshop
                     .items
@@ -1065,102 +1051,45 @@ impl App {
                     .collect();
                 checked.sort();
                 checked.dedup();
+                if added > 0 {
+                    if let Err(error) = core::save_profile(&self.dir, &updated) {
+                        self.requirements_error = Some((job.profile_id, error.clone()));
+                        self.notify(ctx, Err(format!("Couldn't save required mods: {error}")));
+                        return;
+                    }
+                }
                 self.requirements_attempted.insert(job.profile_id, checked);
-                if let Some(saved) = saved {
+                if added > 0 {
+                    self.profiles[index] = updated;
                     if self.selected == index {
                         self.review = None;
                     }
                     self.notify(
                         ctx,
-                        saved.map(|_| {
-                            format!(
-                                "Added {added} required mod{} to this preset.",
-                                if added == 1 { "" } else { "s" }
-                            )
-                        }),
+                        Ok(format!(
+                            "Added {added} required mod{} to this preset.",
+                            if added == 1 { "" } else { "s" }
+                        )),
                     );
                 }
             }
         }
     }
 
-    fn start_add(&mut self, ctx: &egui::Context, result: core::WorkshopSearchItem) {
-        if self.add_rx.is_some() || self.requirements.is_some() {
-            return;
-        }
-        let profile_id = self.profile().id.clone();
-        let (tx, rx) = mpsc::channel();
-        self.add_rx = Some(rx);
-        let repaint = ctx.clone();
-        std::thread::spawn(move || {
-            let result = (|| {
-                let ids = workshop::required_items(&result.id)?;
-                let meta = workshop::dependency_meta(&ids)?;
-                let dependencies = ids
-                    .iter()
-                    .map(|id| WorkshopItem {
-                        id: id.clone(),
-                        title: meta.get(id).map(|item| item.title.clone()),
-                        available: true,
-                        manually_added: true,
-                    })
-                    .collect();
-                Ok((profile_id, result, dependencies, meta))
-            })();
-            let _ = tx.send(result);
-            repaint.request_repaint();
-        });
-    }
-
-    fn poll_add(&mut self, ctx: &egui::Context) {
-        let Some(result) = self.add_rx.as_ref().and_then(|rx| rx.try_recv().ok()) else {
-            return;
-        };
-        self.add_rx = None;
-        match result {
-            Ok((profile_id, result, dependencies, meta)) => {
-                self.meta.extend(meta);
+    fn add_discovery_mod(&mut self, ctx: &egui::Context, result: core::WorkshopSearchItem) {
+        match core::add_discovery_mod(&self.dir, &mut self.profiles[self.selected], &result) {
+            Ok(true) => {
+                self.meta.insert(result.id, result.meta);
                 let _ = workshop::save_meta(&self.dir, &self.meta);
-                if let Some(index) = self.profiles.iter().position(|p| p.id == profile_id) {
-                    let profile = &mut self.profiles[index];
-                    let mut present: HashSet<String> = profile
-                        .workshop
-                        .items
-                        .iter()
-                        .map(|item| item.id.clone())
-                        .collect();
-                    let root = WorkshopItem {
-                        id: result.id,
-                        title: Some(result.meta.title),
-                        available: true,
-                        manually_added: true,
-                    };
-                    let mut count = 0;
-                    for item in std::iter::once(root).chain(dependencies) {
-                        if present.insert(item.id.clone()) {
-                            profile.workshop.items.push(item);
-                            count += 1;
-                        }
-                    }
-                    if count > 0 {
-                        profile.sync.addons = true;
-                        if self.selected == index {
-                            self.review = None;
-                        }
-                    }
-                    let saved = core::save_profile(&self.dir, profile);
-                    self.notify(
-                        ctx,
-                        saved.map(|_| {
-                            format!(
-                                "Added {count} mod{}; Steam downloads missing mods on Play.",
-                                if count == 1 { "" } else { "s" }
-                            )
-                        }),
-                    );
-                }
+                self.review = None;
+                self.notify(
+                    ctx,
+                    Ok("Added to preset. Steam downloads it on Play; checking required mods separately.".into()),
+                );
+                ctx.request_repaint();
             }
-            Err(e) => self.notify(ctx, Err(e)),
+            Ok(false) => self.notify(ctx, Ok("Already in this preset.".into())),
+            Err(error) => self.notify(ctx, Err(format!("Couldn't save mod to preset: {error}"))),
         }
     }
 
@@ -1822,7 +1751,7 @@ impl App {
             .is_some_and(|(id, _)| id == &self.profile().id)
         {
             ui.label(
-                RichText::new("Couldn't check required mods. Use Check required mods to retry.")
+                RichText::new("Couldn't check required mods. Mods you added are still saved; use Check required mods to retry.")
                     .size(12.0)
                     .color(AMBER),
             );
@@ -2000,22 +1929,27 @@ impl App {
                         self.search(ctx, 1);
                     }
                 });
-                if self.add_rx.is_some() {
-                    ui.horizontal(|ui| {
-                        ui.add(egui::Spinner::new().size(14.0));
-                        ui.label("Checking required mods…");
-                    });
+                if self
+                    .requirements
+                    .as_ref()
+                    .is_some_and(|job| job.profile_id == self.profile().id)
+                {
+                    ui.label(
+                        RichText::new("Checking required mods separately…")
+                            .size(12.0)
+                            .color(MUTED),
+                    );
                 }
                 if self.results.is_empty() {
                     return;
                 }
                 ui.add_space(8.0);
-                let present: HashSet<String> = self
+                let present: HashMap<String, bool> = self
                     .profile()
                     .workshop
                     .items
                     .iter()
-                    .map(|i| i.id.clone())
+                    .map(|item| (item.id.clone(), item.available))
                     .collect();
                 let mut add = None;
                 egui::ScrollArea::vertical()
@@ -2078,14 +2012,26 @@ impl App {
                                 pos2(rect.right() - 86.0, rect.center().y - 14.0),
                                 vec2(78.0, 28.0),
                             );
-                            let added = present.contains(&result.id);
+                            let state = present.get(&result.id).copied();
+                            let added = state == Some(true);
                             if put_free(
                                 ui,
                                 button,
-                                egui::Button::new(if added { "Added" } else { "Add" })
-                                    .selected(added),
-                                self.add_rx.is_none() && self.requirements.is_none() && !added,
+                                egui::Button::new(if added {
+                                    "Added"
+                                } else if state == Some(false) {
+                                    "Restore"
+                                } else {
+                                    "Add"
+                                })
+                                .selected(added),
+                                !added,
                             )
+                            .on_hover_text(if added {
+                                "Already in this preset. Clear the Mods filter if you don't see it."
+                            } else {
+                                "Save to this preset; downloads on Play."
+                            })
                             .clicked()
                             {
                                 add = Some(result.clone());
@@ -2103,7 +2049,7 @@ impl App {
                         }
                     });
                 if let Some(result) = add {
-                    self.start_add(ctx, result);
+                    self.add_discovery_mod(ctx, result);
                 }
             });
     }
@@ -2889,7 +2835,6 @@ impl eframe::App for App {
         self.poll_authors();
         self.poll_search(ctx);
         self.poll_requirements(ctx);
-        self.poll_add(ctx);
         self.poll_refresh(ctx);
         self.poll_job(ctx);
         self.poll_update(ctx);
@@ -2908,7 +2853,6 @@ impl eframe::App for App {
         if self.job.is_some()
             || self.search_rx.is_some()
             || self.refresh_rx.is_some()
-            || self.add_rx.is_some()
             || self.requirements.is_some()
         {
             ctx.request_repaint_after(Duration::from_millis(100));

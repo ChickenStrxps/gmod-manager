@@ -94,6 +94,44 @@ pub fn save_profile(dir: &Path, profile: &Profile) -> Result<(), String> {
     fs::create_dir_all(&folder).map_err(|e| e.to_string())?;
     write_json(&folder.join(format!("{}.json", profile.id)), profile)
 }
+/// Save the chosen Workshop mod before any optional requirement lookup. A failed save
+/// must not make Discovery claim that the mod was added.
+pub fn add_discovery_mod(
+    dir: &Path,
+    profile: &mut Profile,
+    result: &WorkshopSearchItem,
+) -> Result<bool, String> {
+    if profile
+        .workshop
+        .items
+        .iter()
+        .any(|item| item.id == result.id && item.available)
+    {
+        return Ok(false);
+    }
+    let mut updated = profile.clone();
+    if let Some(item) = updated
+        .workshop
+        .items
+        .iter_mut()
+        .find(|item| item.id == result.id)
+    {
+        item.available = true;
+        item.manually_added = true;
+        item.title = Some(result.meta.title.clone());
+    } else {
+        updated.workshop.items.push(WorkshopItem {
+            id: result.id.clone(),
+            title: Some(result.meta.title.clone()),
+            available: true,
+            manually_added: true,
+        });
+    }
+    updated.sync.addons = true;
+    save_profile(dir, &updated)?;
+    *profile = updated;
+    Ok(true)
+}
 
 const MAX_PRESET_JSON_BYTES: usize = 16 * 1024 * 1024;
 const MAX_PRESET_ARCHIVE_BYTES: u64 = 32 * 1024 * 1024;
@@ -1393,6 +1431,54 @@ mod tests {
     fn workshop_search_parser_keeps_unique_result_ids() {
         let html = r#"<a href="https://steamcommunity.com/sharedfiles/filedetails/?id=123">One</a><a href="https://steamcommunity.com/sharedfiles/filedetails/?id=123">One again</a><a href="https://steamcommunity.com/sharedfiles/filedetails/?id=456">Two</a>"#;
         assert_eq!(workshop_ids_from_search_html(html), vec!["123", "456"]);
+    }
+
+    #[test]
+    fn discovery_add_survives_missing_requirement_data_and_restores_unavailable_items() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut profile = Profile::blank("Test", "test");
+        profile.sync.addons = false;
+        let result = WorkshopSearchItem {
+            id: "123".into(),
+            meta: ItemMeta {
+                title: "Example mod".into(),
+                available: true,
+                ..Default::default()
+            },
+        };
+        assert!(add_discovery_mod(temp.path(), &mut profile, &result).unwrap());
+        let path = temp.path().join("presets/test.json");
+        let saved: Profile = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert_eq!(saved.workshop.items.len(), 1);
+        assert_eq!(saved.workshop.items[0].id, result.id);
+        assert!(saved.workshop.items[0].manually_added);
+        assert!(saved.sync.addons);
+        assert!(!add_discovery_mod(temp.path(), &mut profile, &result).unwrap());
+        assert_eq!(profile.workshop.items.len(), 1);
+
+        profile.workshop.items[0].available = false;
+        save_profile(temp.path(), &profile).unwrap();
+        assert!(add_discovery_mod(temp.path(), &mut profile, &result).unwrap());
+        let restored: Profile = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert_eq!(restored.workshop.items.len(), 1);
+        assert!(restored.workshop.items[0].available);
+        assert!(restored.workshop.items[0].manually_added);
+    }
+
+    #[test]
+    fn discovery_does_not_claim_addition_if_preset_cannot_be_saved() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::write(temp.path().join("presets"), b"not a directory").unwrap();
+        let mut profile = Profile::blank("Test", "test");
+        let result = WorkshopSearchItem {
+            id: "123".into(),
+            meta: ItemMeta {
+                title: "Test mod".into(),
+                ..Default::default()
+            },
+        };
+        assert!(add_discovery_mod(temp.path(), &mut profile, &result).is_err());
+        assert!(profile.workshop.items.is_empty());
     }
 
     #[test]

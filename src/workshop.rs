@@ -126,43 +126,6 @@ fn parse_required_items(html: &str) -> Vec<String> {
     ids
 }
 
-/// Recursively collect required Workshop mods. Failure leaves the preset unchanged.
-pub fn required_items(id: &str) -> Result<Vec<String>, String> {
-    let agent = agent();
-    required_items_with(id, |next| {
-        community_page(
-            &agent,
-            &format!("https://steamcommunity.com/sharedfiles/filedetails/?id={next}"),
-        )
-    })
-}
-
-fn required_items_with(
-    id: &str,
-    mut fetch: impl FnMut(&str) -> Result<String, String>,
-) -> Result<Vec<String>, String> {
-    if id.is_empty() || !id.bytes().all(|b| b.is_ascii_digit()) {
-        return Err("Invalid Workshop ID".into());
-    }
-    let mut found = Vec::new();
-    let mut seen = HashSet::from([id.to_owned()]);
-    let mut queue = VecDeque::from([id.to_owned()]);
-    while let Some(next) = queue.pop_front() {
-        let html =
-            fetch(&next).map_err(|e| format!("Couldn't check required mods for {next}: {e}"))?;
-        for child in parse_required_items(&html) {
-            if seen.insert(child.clone()) {
-                if found.len() >= 50 {
-                    return Err("This mod requires too many other mods to check.".into());
-                }
-                queue.push_back(child.clone());
-                found.push(child);
-            }
-        }
-    }
-    Ok(found)
-}
-
 fn requirements_path(dir: &Path) -> PathBuf {
     dir.join("cache").join("requirements.json")
 }
@@ -492,30 +455,34 @@ mod tests {
     }
 
     #[test]
-    fn required_items_walks_transitive_links_without_leaking_creator_links_or_cycles() {
-        let mut visited = Vec::new();
-        let found = required_items_with("10", |id| {
-            visited.push(id.to_owned());
-            Ok(match id {
-                "10" => r#"<div id="RequiredItems"><a href="https://steamcommunity.com/workshop/filedetails/?id=20">Base</a><a href="https://steamcommunity.com/workshop/filedetails/?id=30">Extra</a></div><!-- created by --><a href="https://steamcommunity.com/workshop/filedetails/?id=99">Not required</a>"#,
-                "20" => r#"<div id="RequiredItems"><a href="https://steamcommunity.com/workshop/filedetails/?id=10">Cycle</a><a href="https://steamcommunity.com/workshop/filedetails/?id=40">Nested</a></div><!-- created by -->"#,
-                _ => "<div>No required items</div>",
-            }.to_owned())
-        }).unwrap();
-        assert_eq!(found, ["20", "30", "40"]);
-        assert_eq!(visited, ["10", "20", "30", "40"]);
-    }
-
-    #[test]
-    fn required_items_reports_fetch_errors_instead_of_incomplete_list() {
-        let error = required_items_with("10", |id| {
-            if id == "10" {
-                Ok(r#"<div id="RequiredItems"><a href="https://steamcommunity.com/workshop/filedetails/?id=20"></a></div>"#.into())
-            } else {
-                Err("Steam offline".into())
-            }
-        }).unwrap_err();
-        assert!(error.contains("20") && error.contains("Steam offline"));
+    fn rate_limited_requirement_scan_keeps_discovery_mod_on_disk() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut profile = crate::model::Profile::blank("Test", "test");
+        let result = crate::core::WorkshopSearchItem {
+            id: "123".into(),
+            meta: ItemMeta {
+                title: "Example mod".into(),
+                available: true,
+                ..Default::default()
+            },
+        };
+        crate::core::add_discovery_mod(temp.path(), &mut profile, &result).unwrap();
+        let mut cache = HashMap::new();
+        let error = collect_requirements(
+            &[result.id.clone()],
+            &mut cache,
+            |_| Err("curl: (22) The requested URL returned error: 429".into()),
+            |_| Ok(()),
+            |_, _| {},
+        )
+        .unwrap_err();
+        assert!(error.contains("429"));
+        let saved: crate::model::Profile =
+            serde_json::from_slice(&fs::read(temp.path().join("presets/test.json")).unwrap())
+                .unwrap();
+        assert_eq!(saved.workshop.items.len(), 1);
+        assert_eq!(saved.workshop.items[0].id, result.id);
+        assert!(saved.workshop.items[0].available);
     }
 
     #[test]
