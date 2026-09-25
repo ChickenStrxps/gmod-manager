@@ -101,6 +101,7 @@ type IconResult = (String, Option<([usize; 2], Vec<u8>)>);
 struct Icons {
     dir: PathBuf,
     textures: HashMap<String, Option<egui::TextureHandle>>,
+    loaded_at: HashMap<String, f64>,
     queue: Option<Sender<(String, String)>>,
     results: Receiver<IconResult>,
     results_tx: Sender<IconResult>,
@@ -112,6 +113,7 @@ impl Icons {
         Self {
             dir,
             textures: HashMap::new(),
+            loaded_at: HashMap::new(),
             queue: None,
             results,
             results_tx,
@@ -156,7 +158,11 @@ impl Icons {
     }
 
     fn poll(&mut self, ctx: &egui::Context) {
+        let now = ctx.input(|i| i.time);
         while let Ok((id, image)) = self.results.try_recv() {
+            if image.is_some() {
+                self.loaded_at.insert(id.clone(), now);
+            }
             let texture = image.map(|(size, rgba)| {
                 ctx.load_texture(
                     format!("icon-{id}"),
@@ -247,6 +253,11 @@ struct App {
     update: Option<update::Release>,
     update_rx: Option<Receiver<Result<Option<update::Release>, String>>>,
     update_manual: bool,
+
+    shown_view: (View, usize),
+    view_changed_at: f64,
+    shown_tab: Tab,
+    tab_changed_at: f64,
 }
 
 impl App {
@@ -319,6 +330,10 @@ impl App {
             update: None,
             update_rx: None,
             update_manual: false,
+            shown_view: (View::Preset, selected),
+            view_changed_at: f64::NEG_INFINITY,
+            shown_tab: Tab::Mods,
+            tab_changed_at: f64::NEG_INFINITY,
         };
         app.rescan();
         update::cleanup();
@@ -585,6 +600,8 @@ impl App {
         if self.job.is_some() {
             return;
         }
+        // Start the progress bar from empty rather than gliding back from the last job.
+        ctx.data_mut(|d| d.remove::<(f32, f32, f64)>(Id::new("job-progress")));
         let (tx, rx) = mpsc::channel();
         let repaint = ctx.clone();
         std::thread::spawn(move || {
@@ -1514,15 +1531,24 @@ impl App {
         let (rect, response) =
             ui.allocate_exact_size(vec2(ui.available_width(), 50.0), Sense::click());
         let painter = ui.painter_at(rect);
-        if active {
-            painter.rect_filled(rect, 7.0, ROW);
+        let hover =
+            ui.ctx()
+                .animate_bool_with_time(response.id.with("hover"), response.hovered(), 0.12);
+        let selected = ui
+            .ctx()
+            .animate_bool_with_time(response.id.with("active"), active, 0.2);
+        if hover > 0.0 && selected < 1.0 {
+            painter.rect_filled(rect, 7.0, ROW.gamma_multiply(0.6 * hover));
+        }
+        if selected > 0.0 {
+            painter.rect_filled(rect, 7.0, ROW.gamma_multiply(selected));
+            // The accent bar grows out from the middle when a preset is picked.
+            let bar = (rect.height() - 24.0) * ease_out(selected);
             painter.rect_filled(
-                Rect::from_min_size(rect.min + vec2(0.0, 12.0), vec2(3.0, rect.height() - 24.0)),
+                Rect::from_center_size(pos2(rect.left() + 1.5, rect.center().y), vec2(3.0, bar)),
                 2.0,
                 ACCENT,
             );
-        } else if response.hovered() {
-            painter.rect_filled(rect, 7.0, ROW.gamma_multiply(0.6));
         }
         let profile = &self.profiles[index];
         let first = profile
@@ -1582,14 +1608,20 @@ impl App {
         title: &str,
         radius: u8,
     ) {
-        match self.icons.get(ui.ctx(), id, url) {
-            Some(texture) => {
-                egui::Image::from_texture((texture, rect.size()))
-                    .corner_radius(radius)
-                    .paint_at(ui, rect);
-            }
-            None => letter_tile(ui, rect, title, radius),
+        // Thumbnails fade in over their letter tile instead of popping in.
+        let Some(texture) = self.icons.get(ui.ctx(), id, url) else {
+            letter_tile(ui, rect, title, radius);
+            return;
+        };
+        let since = self.icons.loaded_at.get(id).copied().unwrap_or(0.0);
+        let t = fade_since(ui.ctx(), since, 0.3);
+        if t < 1.0 {
+            letter_tile(ui, rect, title, radius);
         }
+        egui::Image::from_texture((texture, rect.size()))
+            .corner_radius(radius)
+            .tint(Color32::WHITE.gamma_multiply(t))
+            .paint_at(ui, rect);
     }
 
     fn header(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
@@ -1603,9 +1635,23 @@ impl App {
         let name = profile.name.clone();
         let summary = format!("{} mods · {}", items.len(), self.size_text(profile));
         let has_edits = !profile.optional_custom_files.source_url.is_empty();
-        ui.horizontal(|ui| {
+        let (banner, _) = ui.allocate_exact_size(vec2(ui.available_width(), 138.0), Sense::hover());
+        self.paint_banner(ui, banner);
+        let mut content = ui.new_child(
+            egui::UiBuilder::new()
+                .max_rect(banner.shrink2(vec2(22.0, 18.0)))
+                .layout(Layout::bottom_up(Align::LEFT)),
+        );
+        let row = vec2(content.available_width(), 78.0);
+        content.allocate_ui_with_layout(row, Layout::left_to_right(Align::Max), |ui| {
             ui.vertical(|ui| {
-                ui.label(semibold(&name, 24.0));
+                ui.label(
+                    RichText::new("PRESET")
+                        .size(11.0)
+                        .color(MUTED)
+                        .extra_letter_spacing(1.5),
+                );
+                ui.label(semibold(&name, 26.0));
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 0.0;
                     ui.label(RichText::new(summary).color(MUTED));
@@ -1623,15 +1669,20 @@ impl App {
                     }
                 });
             });
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            ui.with_layout(Layout::right_to_left(Align::Max), |ui| {
                 if let Some(job) = &self.job {
                     ui.vertical(|ui| {
                         ui.set_width(260.0);
                         ui.add(
-                            egui::ProgressBar::new(job.fraction)
-                                .desired_height(6.0)
-                                .fill(ACCENT)
-                                .corner_radius(3),
+                            egui::ProgressBar::new(ease_to(
+                                ctx,
+                                Id::new("job-progress"),
+                                job.fraction,
+                                0.35,
+                            ))
+                            .desired_height(6.0)
+                            .fill(ACCENT)
+                            .corner_radius(3),
                         );
                         ui.label(RichText::new(&job.label).size(12.0).color(MUTED));
                     });
@@ -1681,6 +1732,95 @@ impl App {
         });
     }
 
+    /// Paints the preset banner: a staggered mosaic of the preset's mod thumbnails that fades
+    /// into the page behind the title, and drifts slightly with the pointer.
+    fn paint_banner(&mut self, ui: &mut egui::Ui, banner: Rect) {
+        let radius = 12u8;
+        let painter = ui.painter_at(banner);
+        painter.rect_filled(banner, radius, ROW);
+        paint_hgradient(
+            &painter,
+            banner,
+            Color32::TRANSPARENT,
+            ACCENT.gamma_multiply(0.16),
+        );
+
+        let tiles: Vec<(String, String, String)> = self
+            .profile()
+            .workshop
+            .items
+            .iter()
+            .filter(|i| i.available)
+            .map(|item| {
+                let url = self
+                    .meta
+                    .get(&item.id)
+                    .map(|m| m.preview_url.clone())
+                    .unwrap_or_default();
+                (item.id.clone(), url, self.title_of(item).to_owned())
+            })
+            .collect();
+
+        let ctx = ui.ctx().clone();
+        let pointer = ui
+            .rect_contains_pointer(banner)
+            .then(|| ctx.pointer_hover_pos())
+            .flatten()
+            .map_or(0.0, |p| (p.x - banner.center().x) / banner.width());
+        let drift = ease_to(&ctx, Id::new("banner-drift"), -pointer * 14.0, 0.6);
+
+        let mut clipped = ui.new_child(egui::UiBuilder::new().max_rect(banner));
+        clipped.set_clip_rect(banner.intersect(ui.clip_rect()));
+        let gap = 6.0;
+        let tile = (banner.height() - gap) / 2.0;
+        let step = tile + gap;
+        let columns = (banner.width() / step).ceil() as usize + 1;
+        let mut next = tiles.iter();
+        // Fill from the right edge, where the fade is lightest, so small presets still show off.
+        'fill: for column in 0..columns {
+            let x = banner.right() - 10.0 - step * (column as f32 + 1.0) + gap + drift;
+            let stagger = if column % 2 == 1 { -tile / 2.0 } else { 0.0 };
+            for row in 0..3 {
+                let Some((id, url, title)) = next.next() else {
+                    break 'fill;
+                };
+                let y = banner.top() + stagger + step * row as f32;
+                let cell = Rect::from_min_size(pos2(x, y), vec2(tile, tile));
+                self.draw_icon(&clipped, cell, id, url, title, 8);
+            }
+        }
+
+        // Dim the mosaic, then fade it out toward the title on the left.
+        painter.rect_filled(banner, radius, BG.gamma_multiply(0.45));
+        let fade = Rect::from_min_max(banner.min, pos2(banner.right() - 60.0, banner.bottom()));
+        paint_hgradient(
+            &painter,
+            fade,
+            BG.gamma_multiply(0.97),
+            Color32::TRANSPARENT,
+        );
+        let bottom = Rect::from_min_max(pos2(banner.left(), banner.center().y), banner.max);
+        paint_vgradient(
+            &painter,
+            bottom,
+            Color32::TRANSPARENT,
+            BG.gamma_multiply(0.55),
+        );
+        // Round the corners by masking them with the page color.
+        ui.painter().rect_stroke(
+            banner,
+            radius,
+            Stroke::new(10.0, BG),
+            egui::StrokeKind::Outside,
+        );
+        ui.painter().rect_stroke(
+            banner,
+            radius,
+            Stroke::new(1.0, Color32::from_white_alpha(10)),
+            egui::StrokeKind::Inside,
+        );
+    }
+
     fn open_link(&mut self, ctx: &egui::Context, url: &str) {
         if let Err(e) = open_url(url) {
             self.notify(ctx, Err(e));
@@ -1704,6 +1844,7 @@ impl App {
         let top = ui.cursor().top();
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 22.0;
+            let mut underline = None;
             for (tab, label) in tabs {
                 let active = self.tab == tab;
                 let response = ui
@@ -1717,15 +1858,19 @@ impl App {
                     )
                     .on_hover_cursor(egui::CursorIcon::PointingHand);
                 if active {
-                    ui.painter().hline(
-                        response.rect.x_range(),
-                        response.rect.bottom() + 7.0,
-                        Stroke::new(2.0, ACCENT),
-                    );
+                    underline = Some(response.rect);
                 }
                 if response.clicked() {
                     self.tab = tab;
                 }
+            }
+            // The underline glides between tabs instead of jumping.
+            if let Some(rect) = underline {
+                let ctx = ui.ctx().clone();
+                let left = ease_to(&ctx, Id::new("tab-underline-left"), rect.left(), 0.22);
+                let right = ease_to(&ctx, Id::new("tab-underline-right"), rect.right(), 0.22);
+                ui.painter()
+                    .hline(left..=right, rect.bottom() + 7.0, Stroke::new(2.0, ACCENT));
             }
         });
         let y = ui.cursor().top().max(top + 26.0) + 1.0;
@@ -1738,6 +1883,7 @@ impl App {
         self.header(ui, ctx);
         ui.add_space(14.0);
         self.tabs(ui);
+        ui.multiply_opacity(fade_since(ctx, self.tab_changed_at, 0.16));
         match self.tab {
             Tab::Mods => self.mods_tab(ui, ctx),
             Tab::Binds => self.binds_tab(ui, ctx),
@@ -1904,9 +2050,12 @@ impl App {
         let (rect, response) =
             ui.allocate_exact_size(vec2(ui.available_width(), ROW_HEIGHT), Sense::click());
         let hovered = ui.rect_contains_pointer(rect);
-        if hovered {
+        let hover = ui
+            .ctx()
+            .animate_bool_with_time(Id::new(("mod-row", &row.id)), hovered, 0.12);
+        if hover > 0.0 {
             ui.painter()
-                .rect_filled(rect.shrink2(vec2(0.0, 2.0)), 7.0, ROW);
+                .rect_filled(rect.shrink2(vec2(0.0, 2.0)), 7.0, ROW.gamma_multiply(hover));
         }
         let icon = Rect::from_min_size(rect.min + vec2(8.0, 7.0), vec2(36.0, 36.0));
         self.draw_icon(ui, icon, &row.id, &row.url, &row.title, 5);
@@ -2437,9 +2586,14 @@ impl App {
                     ui.vertical(|ui| {
                         ui.set_width(260.0);
                         ui.add(
-                            egui::ProgressBar::new(job.fraction)
-                                .desired_height(6.0)
-                                .fill(ACCENT),
+                            egui::ProgressBar::new(ease_to(
+                                ctx,
+                                Id::new("job-progress"),
+                                job.fraction,
+                                0.35,
+                            ))
+                            .desired_height(6.0)
+                            .fill(ACCENT),
                         );
                         ui.label(RichText::new(&job.label).size(12.0).color(MUTED));
                     });
@@ -2944,11 +3098,23 @@ impl App {
             return;
         }
         ctx.request_repaint_after(Duration::from_millis(250));
+        // Slide up and fade in, then fade out just before it expires.
+        let enter = fade_since(ctx, toast.shown_at, 0.22);
+        let leave = ((toast.shown_at + life - now) as f32 / 0.3).clamp(0.0, 1.0);
+        if leave < 1.0 {
+            ctx.request_repaint();
+        }
+        let shown = enter.min(ease_out(leave));
         let mut dismiss = false;
         egui::Area::new(Id::new("toast"))
-            .anchor(Align2::CENTER_BOTTOM, vec2(118.0, -22.0))
+            .anchor(
+                Align2::CENTER_BOTTOM,
+                vec2(118.0, -22.0 + 14.0 * (1.0 - enter)),
+            )
             .order(egui::Order::Foreground)
+            .fade_in(false)
             .show(ctx, |ui| {
+                ui.multiply_opacity(shown);
                 let response = Frame::new()
                     .fill(Color32::from_rgb(44, 48, 55))
                     .stroke(Stroke::new(1.0, if toast.error { RED } else { LINE }))
@@ -3000,6 +3166,17 @@ impl eframe::App for App {
             ctx.request_repaint_after(Duration::from_millis(100));
         }
         self.sidebar(ctx);
+        // Fade the page in when switching views or presets, and the tab body when switching tabs.
+        let shown = (self.view, self.selected);
+        if shown != self.shown_view {
+            self.shown_view = shown;
+            self.view_changed_at = now;
+        }
+        if self.tab != self.shown_tab {
+            self.shown_tab = self.tab;
+            self.tab_changed_at = now;
+        }
+        let page_fade = fade_since(ctx, self.view_changed_at, 0.18);
         egui::CentralPanel::default()
             .frame(Frame::new().fill(BG).inner_margin(Margin {
                 left: 28,
@@ -3007,13 +3184,16 @@ impl eframe::App for App {
                 top: 22,
                 bottom: 12,
             }))
-            .show(ctx, |ui| match self.view {
-                View::Preset => self.preset_view(ui, ctx),
-                View::Library => self.library_view(ui, ctx),
-                View::Settings => {
-                    egui::ScrollArea::vertical()
-                        .auto_shrink([false, false])
-                        .show(ui, |ui| self.settings_view(ui, ctx));
+            .show(ctx, |ui| {
+                ui.multiply_opacity(page_fade);
+                match self.view {
+                    View::Preset => self.preset_view(ui, ctx),
+                    View::Library => self.library_view(ui, ctx),
+                    View::Settings => {
+                        egui::ScrollArea::vertical()
+                            .auto_shrink([false, false])
+                            .show(ui, |ui| self.settings_view(ui, ctx));
+                    }
                 }
             });
         self.new_preset_modal(ctx);
@@ -3050,21 +3230,74 @@ fn empty_state(ui: &mut egui::Ui, text: &str) {
     ui.add_space(6.0);
 }
 
-fn primary_button(text: &str) -> egui::Button<'_> {
-    egui::Button::new(
-        RichText::new(text)
-            .color(Color32::WHITE)
-            .family(FontFamily::Name("semibold".into())),
-    )
-    .fill(ACCENT)
-    .stroke(Stroke::NONE)
-    .min_size(vec2(0.0, 30.0))
+fn primary_button(text: &str) -> FeedbackButton<'_> {
+    FeedbackButton {
+        button: egui::Button::new(
+            RichText::new(text)
+                .color(Color32::WHITE)
+                .family(FontFamily::Name("semibold".into())),
+        )
+        .fill(ACCENT)
+        .stroke(Stroke::NONE)
+        .min_size(vec2(0.0, 30.0)),
+        glow: true,
+    }
 }
 
-fn soft_button(text: &str) -> egui::Button<'_> {
-    egui::Button::new(RichText::new(text).color(TEXT))
-        .fill(ROW_HOVER)
-        .min_size(vec2(0.0, 30.0))
+fn soft_button(text: &str) -> FeedbackButton<'_> {
+    FeedbackButton {
+        button: egui::Button::new(RichText::new(text).color(TEXT))
+            .fill(ROW_HOVER)
+            .min_size(vec2(0.0, 30.0)),
+        glow: false,
+    }
+}
+
+/// A filled button that still reacts to hover and press. A custom fill turns off egui's own
+/// hover colors, so this brightens on hover, darkens while held, and primary buttons glow.
+struct FeedbackButton<'a> {
+    button: egui::Button<'a>,
+    glow: bool,
+}
+
+impl FeedbackButton<'_> {
+    fn min_size(mut self, size: egui::Vec2) -> Self {
+        self.button = self.button.min_size(size);
+        self
+    }
+}
+
+impl egui::Widget for FeedbackButton<'_> {
+    fn ui(self, ui: &mut egui::Ui) -> egui::Response {
+        let behind = ui.painter().add(egui::Shape::Noop);
+        let response = ui.add(self.button);
+        let hover = ui.ctx().animate_bool_with_time(
+            response.id.with("hover"),
+            response.hovered() && response.enabled(),
+            0.12,
+        );
+        if hover > 0.0 {
+            if self.glow {
+                let shadow = egui::Shadow {
+                    offset: [0, 2],
+                    blur: 14,
+                    spread: 0,
+                    color: ACCENT.gamma_multiply(0.45 * hover),
+                };
+                ui.painter().set(
+                    behind,
+                    shadow.as_shape(response.rect, CornerRadius::same(6)),
+                );
+            }
+            let overlay = if response.is_pointer_button_down_on() {
+                Color32::from_black_alpha(45)
+            } else {
+                Color32::from_white_alpha((18.0 * hover) as u8)
+            };
+            ui.painter().rect_filled(response.rect, 6.0, overlay);
+        }
+        response
+    }
 }
 
 /// Places a widget at `rect` without moving the parent's cursor, so painted rows keep their height.
@@ -3089,17 +3322,25 @@ fn icon_button(text: &str) -> egui::Button<'_> {
 
 fn nav_item(ui: &mut egui::Ui, text: &str, active: bool) -> egui::Response {
     let (rect, response) = ui.allocate_exact_size(vec2(ui.available_width(), 34.0), Sense::click());
+    let hover =
+        ui.ctx()
+            .animate_bool_with_time(response.id.with("hover"), response.hovered(), 0.12);
     if active {
         ui.painter().rect_filled(rect, 7.0, ROW);
-    } else if response.hovered() {
-        ui.painter().rect_filled(rect, 7.0, ROW.gamma_multiply(0.6));
+    } else if hover > 0.0 {
+        ui.painter()
+            .rect_filled(rect, 7.0, ROW.gamma_multiply(0.6 * hover));
     }
     ui.painter().text(
-        pos2(rect.left() + 12.0, rect.center().y),
+        pos2(rect.left() + 12.0 + 2.0 * hover, rect.center().y),
         Align2::LEFT_CENTER,
         text,
         FontId::proportional(14.0),
-        if active { TEXT } else { MUTED },
+        if active {
+            TEXT
+        } else {
+            lerp_color(MUTED, TEXT, hover * 0.6)
+        },
     );
     response.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
@@ -3148,6 +3389,65 @@ fn toggle_row(ui: &mut egui::Ui, on: &mut bool, label: &str) -> bool {
 fn lerp_color(a: Color32, b: Color32, t: f32) -> Color32 {
     let mix = |x: u8, y: u8| (x as f32 + (y as f32 - x as f32) * t).round() as u8;
     Color32::from_rgb(mix(a.r(), b.r()), mix(a.g(), b.g()), mix(a.b(), b.b()))
+}
+
+fn paint_hgradient(painter: &egui::Painter, rect: Rect, left: Color32, right: Color32) {
+    paint_gradient(painter, rect, [left, right, right, left]);
+}
+
+fn paint_vgradient(painter: &egui::Painter, rect: Rect, top: Color32, bottom: Color32) {
+    paint_gradient(painter, rect, [top, top, bottom, bottom]);
+}
+
+/// Fills `rect` with colors given for its top-left, top-right, bottom-right and bottom-left corners.
+fn paint_gradient(painter: &egui::Painter, rect: Rect, colors: [Color32; 4]) {
+    let mut mesh = egui::Mesh::default();
+    let corners = [
+        rect.left_top(),
+        rect.right_top(),
+        rect.right_bottom(),
+        rect.left_bottom(),
+    ];
+    for (pos, color) in corners.into_iter().zip(colors) {
+        mesh.colored_vertex(pos, color);
+    }
+    mesh.add_triangle(0, 1, 2);
+    mesh.add_triangle(0, 2, 3);
+    painter.add(mesh);
+}
+
+/// Cubic ease-out, 0..1 → 0..1.
+fn ease_out(t: f32) -> f32 {
+    1.0 - (1.0 - t.clamp(0.0, 1.0)).powi(3)
+}
+
+/// Eased progress (0..1) of an animation that started at `since`; keeps repainting until done.
+fn fade_since(ctx: &egui::Context, since: f64, secs: f32) -> f32 {
+    let t = ((ctx.input(|i| i.time) - since) as f32 / secs).clamp(0.0, 1.0);
+    if t < 1.0 {
+        ctx.request_repaint();
+    }
+    ease_out(t)
+}
+
+/// Glides a value toward `target` with an ease-out, restarting smoothly when the target moves.
+fn ease_to(ctx: &egui::Context, id: Id, target: f32, secs: f32) -> f32 {
+    let now = ctx.input(|i| i.time);
+    let sample = |(from, to, start): (f32, f32, f64)| {
+        let t = ((now - start) as f32 / secs).clamp(0.0, 1.0);
+        (from + (to - from) * ease_out(t), t < 1.0)
+    };
+    let (value, moving) = ctx.data_mut(|d| {
+        let slot = d.get_temp_mut_or_insert_with(id, || (target, target, now));
+        if slot.1 != target {
+            *slot = (sample(*slot).0, target, now);
+        }
+        sample(*slot)
+    });
+    if moving {
+        ctx.request_repaint();
+    }
+    value
 }
 
 /// Paints one line of text, cut off with an ellipsis if it doesn't fit.
