@@ -564,12 +564,17 @@ mod tests {
 
     #[test]
     fn http_429_pauses_without_marking_page_checked() {
-        use std::{io::Write, net::TcpListener};
+        use std::{
+            io::{Read, Write},
+            net::TcpListener,
+        };
 
         let server = TcpListener::bind("127.0.0.1:0").unwrap();
         let url = format!("http://{}/workshop", server.local_addr().unwrap());
         let responder = std::thread::spawn(move || {
             let (mut client, _) = server.accept().unwrap();
+            let mut request = [0u8; 4096];
+            client.read(&mut request).unwrap();
             client
                 .write_all(b"HTTP/1.1 429 Too Many Requests\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
                 .unwrap();
@@ -585,7 +590,7 @@ mod tests {
         .unwrap();
         responder.join().unwrap();
         assert!(added.is_empty());
-        assert!(warning.unwrap().contains("429"));
+        assert!(warning.as_deref().unwrap().contains("429"), "{warning:?}");
         assert!(!cache.contains_key("2916561591"));
     }
 
