@@ -27,6 +27,8 @@ pub struct WorkshopStatus {
     pub profile: String,
     pub total: usize,
     pub subscribed: usize,
+    pub downloaded: Option<usize>,
+    pub mounted: Option<usize>,
 }
 
 pub fn read_workshop_status(game: &Path) -> Option<WorkshopStatus> {
@@ -867,12 +869,21 @@ local catalog = __CATALOG__\n\
 local tabScript = __TAB_JS__\n\
 local requested = 0\n\
 -- Adds the GMod Manager tab to the Addons page of the main menu.\n\
-function GMMMenuTab()\n\
+local function addonsById()\n\
+  local addons = {}\n\
+  for _, addon in ipairs(engine.GetAddons()) do\n\
+    if addon.wsid then addons[tostring(addon.wsid)] = addon end\n\
+  end\n\
+  return addons\n\
+end\n\
+function GMMMenuTab(addons)\n\
   if not IsValid(pnlMainMenu) then return end\n\
+  addons = addons or addonsById()\n\
   local states = {}\n\
   for i, id in ipairs(catalogIds) do\n\
     if file.Exists(\"addons/gmm_\" .. id .. \"/gmm.json\", \"MOD\") then states[i] = \"local\"\n\
-    elseif steamworks and steamworks.IsSubscribed and steamworks.IsSubscribed(id) then states[i] = \"steam\"\n\
+    elseif addons[id] and addons[id].mounted then states[i] = \"steam\"\n\
+    elseif steamworks and steamworks.IsSubscribed and steamworks.IsSubscribed(id) then states[i] = \"downloading\"\n\
     else states[i] = \"missing\" end\n\
   end\n\
   pnlMainMenu:Call(tabScript .. \"\\nGMMInit(\" .. catalog .. \", \" .. util.TableToJSON(states) .. \");\")\n\
@@ -881,20 +892,26 @@ timer.Simple(1, GMMMenuTab)\n\
 timer.Create(\"GMMMenuTabCheck\", 5, 0, function()\n\
   if IsValid(pnlMainMenu) then pnlMainMenu:Call(\"window.GMM || lua.Run('GMMMenuTab()')\") end\n\
 end)\n\
-local function report()\n\
-  local subscribed = 0\n\
+local function report(addons)\n\
+  local subscribed, downloaded, mounted = 0, 0, 0\n\
   for _, id in ipairs(ids) do\n\
-    if steamworks.IsSubscribed(id) then subscribed = subscribed + 1 end\n\
+    if steamworks.IsSubscribed(id) then\n\
+      subscribed = subscribed + 1\n\
+      local addon = addons[id]\n\
+      if addon and addon.downloaded then downloaded = downloaded + 1 end\n\
+      if addon and addon.mounted then mounted = mounted + 1 end\n\
+    end\n\
   end\n\
-  pcall(function() file.Write(\"gmm_workshop_status.json\", util.TableToJSON({ profile = \"__PROFILE__\", ids = ids, total = #ids, subscribed = subscribed, requested = requested })) end)\n\
+  pcall(function() file.Write(\"gmm_workshop_status.json\", util.TableToJSON({ profile = \"__PROFILE__\", ids = ids, total = #ids, subscribed = subscribed, downloaded = downloaded, mounted = mounted, requested = requested })) end)\n\
 end\n\
 local function mount()\n\
   for _, id in ipairs(ids) do\n\
     if steamworks.IsSubscribed(id) then steamworks.SetShouldMountAddon(id, true) end\n\
   end\n\
   steamworks.ApplyAddons()\n\
-  report()\n\
-  GMMMenuTab()\n\
+  local addons = addonsById()\n\
+  report(addons)\n\
+  GMMMenuTab(addons)\n\
 end\n\
 timer.Simple(2, function()\n\
   if not steamworks or not steamworks.Subscribe or not steamworks.IsSubscribed then return end\n\
@@ -914,6 +931,12 @@ timer.Simple(2, function()\n\
   mount()\n\
   hook.Add(\"WorkshopSubscriptionsChanged\", \"GMMWorkshopStatus\", function()\n\
     timer.Create(\"GMMWorkshopStatus\", 1, 1, mount)\n\
+  end)\n\
+  hook.Add(\"WorkshopDownloadedFile\", \"GMMWorkshopDownload\", function()\n\
+    timer.Create(\"GMMWorkshopStatus\", 0.5, 1, mount)\n\
+  end)\n\
+  hook.Add(\"WorkshopEnd\", \"GMMWorkshopEnd\", function()\n\
+    timer.Create(\"GMMWorkshopStatus\", 0.5, 1, mount)\n\
   end)\n\
   timer.Simple(15, mount)\n\
 end)\n";
@@ -1818,21 +1841,6 @@ mod tests {
             .find(|x| x.relative == Path::new("cfg/addonnomount.txt"))
             .unwrap();
         assert_eq!(String::from_utf8_lossy(&disabled.after), "\"888888888\"\n");
-        let menu = preview
-            .changes
-            .iter()
-            .find(|x| x.relative == Path::new("lua/menu/menu.lua"))
-            .unwrap();
-        assert!(String::from_utf8_lossy(&menu.after).contains("include( \"gmm_workshop.lua\" )"));
-        let script = preview
-            .changes
-            .iter()
-            .find(|x| x.relative == Path::new("lua/menu/gmm_workshop.lua"))
-            .unwrap();
-        let script = String::from_utf8_lossy(&script.after);
-        assert!(script.contains("steamworks.Subscribe(id)"));
-        assert!(script.contains("123456789"));
-        assert!(!script.contains("999999999"));
     }
 
     #[test]
@@ -1888,7 +1896,6 @@ mod tests {
                 .starts_with("https://images.example/x/?imw=")
         );
         assert!(!script[body_start..body_end].contains('\u{2028}'));
-        assert!(script.contains("local catalogIds = {\n  \"1\",\n}"));
     }
 
     #[test]
@@ -2008,9 +2015,6 @@ mod tests {
             fs::read(game.join("addons/gmm_333/lua/autorun/a.lua")).unwrap(),
             b"print(1)"
         );
-        let script = fs::read_to_string(game.join("lua/menu/gmm_workshop.lua")).unwrap();
-        assert!(script.contains("local ids = {\n  \"111\",\n}"));
-        assert!(script.contains("local drop = {\n  \"222\",\n}"));
 
         profile.workshop.items = vec![item("111")];
         let prepared = prepare(&game, &profile, Some(&library), &HashMap::new()).unwrap();

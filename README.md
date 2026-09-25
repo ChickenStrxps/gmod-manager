@@ -11,7 +11,7 @@ You need Steam and Garry's Mod installed. The app updates itself.
 
 ## Use
 
-- **Play** applies the preset and starts GMod. Missing mods download when GMod opens.
+- **Play** applies the preset and starts GMod. Missing Workshop mods download after GMod opens; stay on its main menu until **Addons → GMod Manager** shows no mods “not ready.” The Mods tab in this app reports how many Workshop copies GMod has mounted (library copies are separate). If you entered a map while downloads were still finishing, restart the map to load newly available scripts and models.
 - **Mods** – find mods on the Workshop, see their authors and sizes. Discovery saves the mod to the preset immediately, even if Steam rate-limits its separate required-mod check. Missing mods download on Play; use **Check required mods** to retry a failed check.
 - **Binds / Settings** – keybinds and console settings that come with the preset.
 - **Import** – paste a public Garry's Mod Steam collection link or ID to create a preset with its mods; use **Details → Update mods from collection** to refresh it. Or choose a shared preset ZIP/JSON.
@@ -23,6 +23,8 @@ You need Steam and Garry's Mod installed. The app updates itself.
 Turn it on in **Library**. It keeps a compressed copy of every mod, so switching presets doesn't mean downloading everything again. Mods you aren't using get removed from Steam, and they come back from the library when you need them.
 
 In GMod, these mods show up under **Addons → GMod Manager** instead of **Subscribed**.
+
+In the spawn menu, **Entities** only shows entity addons. Look under **Weapons** for weapons and **Browse → Addons** for models and spawnlists; an addon does not necessarily add anything to Entities.
 
 ## Building
 

@@ -8,7 +8,8 @@ window.GMMInit = function (data, states) {
 
   var STATE_TEXT = {
     local: "Installed from the GMod Manager library.",
-    steam: "Installed through Steam.",
+    steam: "Mounted through Steam.",
+    downloading: "Waiting for Steam to download or mount this mod. Stay in the main menu before starting a map.",
     missing: "Not downloaded yet. Press Play in GMod Manager."
   };
 
@@ -38,8 +39,11 @@ window.GMMInit = function (data, states) {
     var subtitle = root.querySelector("h1.gmm-header small");
     var d = G.data;
     title.textContent = "GMod Manager";
+    var waiting = G.states.filter(function (state) { return state !== "local" && state !== "steam"; }).length;
     subtitle.textContent = d.preset + " \u00b7 " + d.mods.length + " mods" +
-      (d.size ? " \u00b7 " + d.size : "") + " \u00b7 Modify in GMM app";
+      (d.size ? " \u00b7 " + d.size : "") +
+      (waiting ? " \u00b7 " + waiting + " not ready (wait before starting a map)" : "") +
+      " \u00b7 Modify in GMM app";
     while (list.firstChild) list.removeChild(list.firstChild);
     if (!d.mods.length) {
       var empty = document.createElement("workshopmessage");
@@ -54,7 +58,7 @@ window.GMMInit = function (data, states) {
     d.mods.forEach(function (mod, index) {
       var state = G.states[index] || "missing";
       var card = document.createElement("workshopicon");
-      card.className = state === "missing" ? "disabled" : "installed";
+      card.className = state === "local" || state === "steam" ? "installed" : "disabled";
       card.style.width = size + "px";
       card.style.height = size + "px";
 

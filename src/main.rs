@@ -1774,15 +1774,28 @@ impl App {
             );
             if let Some(status) = &self.workshop_status {
                 if status.profile == self.profile().id && status.total > 0 {
-                    ui.label(
-                        RichText::new(format!(
-                            "Steam: {} of {} subscribed",
-                            status.subscribed, status.total
-                        ))
-                        .size(12.0)
-                        .color(FAINT),
-                    )
-                    .on_hover_text("Reported by GMod the last time it started.");
+                    if let Some(mounted) = status.mounted {
+                        ui.label(
+                            RichText::new(format!("Workshop: {mounted}/{} mounted", status.total))
+                                .size(12.0)
+                                .color(if mounted == status.total { FAINT } else { AMBER }),
+                        )
+                        .on_hover_text(format!(
+                            "GMod last reported {} downloaded, {} subscribed. Library copies load locally and are not counted. Wait in GMod's main menu before starting a map; restart the map if you entered early.",
+                            status.downloaded.unwrap_or(0),
+                            status.subscribed,
+                        ));
+                    } else {
+                        ui.label(
+                            RichText::new(format!(
+                                "Steam: {} of {} subscribed",
+                                status.subscribed, status.total
+                            ))
+                            .size(12.0)
+                            .color(FAINT),
+                        )
+                        .on_hover_text("Reported by GMod the last time it started. Play with the latest version to see mount status.");
+                    }
                 }
             }
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
