@@ -181,6 +181,7 @@ struct Row {
     id: String,
     title: String,
     size: Option<u64>,
+    author: String,
     state: ModState,
     url: String,
 }
@@ -200,6 +201,22 @@ struct App {
     meta: HashMap<String, ItemMeta>,
     meta_rx: Option<Receiver<Result<HashMap<String, ItemMeta>, String>>>,
     meta_requested: HashSet<String>,
+    authors: HashMap<String, String>,
+    authors_rx: Option<Receiver<HashMap<String, String>>>,
+    authors_requested: HashSet<String>,
+    add_rx: Option<
+        Receiver<
+            Result<
+                (
+                    String,
+                    core::WorkshopSearchItem,
+                    Vec<WorkshopItem>,
+                    HashMap<String, ItemMeta>,
+                ),
+                String,
+            >,
+        >,
+    >,
     icons: Icons,
 
     steam: HashMap<String, SteamCopy>,
@@ -258,6 +275,10 @@ impl App {
         let mut app = Self {
             icons: Icons::new(dir.clone()),
             meta: workshop::load_meta(&dir),
+            authors: workshop::load_authors(&dir),
+            authors_rx: None,
+            authors_requested: HashSet::new(),
+            add_rx: None,
             dir,
             path_input: state.game_path.clone(),
             state,
@@ -321,7 +342,7 @@ impl App {
     }
 
     fn busy(&self) -> bool {
-        self.job.is_some()
+        self.job.is_some() || self.add_rx.is_some()
     }
 
     fn notify(&mut self, ctx: &egui::Context, result: Result<String, String>) {
@@ -464,7 +485,12 @@ impl App {
             .profiles
             .iter()
             .flat_map(|p| p.workshop.items.iter())
-            .filter(|item| !self.meta.contains_key(&item.id))
+            .filter(|item| {
+                !self
+                    .meta
+                    .get(&item.id)
+                    .is_some_and(|meta| !meta.available || !meta.creator.is_empty())
+            })
             .filter(|item| !self.meta_requested.contains(&item.id))
             .map(|item| item.id.clone())
             .collect();
@@ -491,6 +517,55 @@ impl App {
         if let Ok(found) = result {
             self.meta.extend(found);
             let _ = workshop::save_meta(&self.dir, &self.meta);
+        }
+    }
+
+    fn author_of(&self, meta: Option<&ItemMeta>) -> &str {
+        meta.and_then(|meta| self.authors.get(&meta.creator))
+            .map(String::as_str)
+            .unwrap_or("")
+    }
+
+    fn ensure_authors(&mut self, ctx: &egui::Context) {
+        if self.authors_rx.is_some() {
+            return;
+        }
+        let ids: Vec<String> = self
+            .meta
+            .values()
+            .filter(|meta| !meta.creator.is_empty())
+            .map(|meta| &meta.creator)
+            .filter(|id| !self.authors.contains_key(*id) && !self.authors_requested.contains(*id))
+            .take(12)
+            .cloned()
+            .collect();
+        if ids.is_empty() {
+            return;
+        }
+        self.authors_requested.extend(ids.iter().cloned());
+        let (tx, rx) = mpsc::channel();
+        self.authors_rx = Some(rx);
+        let repaint = ctx.clone();
+        std::thread::spawn(move || {
+            let mut found = HashMap::new();
+            for id in ids {
+                if let Ok(name) = workshop::author_name(&id) {
+                    found.insert(id, name);
+                }
+            }
+            let _ = tx.send(found);
+            repaint.request_repaint();
+        });
+    }
+
+    fn poll_authors(&mut self) {
+        let Some(found) = self.authors_rx.as_ref().and_then(|rx| rx.try_recv().ok()) else {
+            return;
+        };
+        self.authors_rx = None;
+        if !found.is_empty() {
+            self.authors.extend(found);
+            let _ = workshop::save_authors(&self.dir, &self.authors);
         }
     }
 
@@ -831,6 +906,86 @@ impl App {
                 self.page = page;
                 if self.results.is_empty() {
                     self.notify(ctx, Ok("No mods found.".into()));
+                }
+            }
+            Err(e) => self.notify(ctx, Err(e)),
+        }
+    }
+
+    fn start_add(&mut self, ctx: &egui::Context, result: core::WorkshopSearchItem) {
+        if self.add_rx.is_some() {
+            return;
+        }
+        let profile_id = self.profile().id.clone();
+        let (tx, rx) = mpsc::channel();
+        self.add_rx = Some(rx);
+        let repaint = ctx.clone();
+        std::thread::spawn(move || {
+            let result = (|| {
+                let ids = workshop::required_items(&result.id)?;
+                let meta = workshop::dependency_meta(&ids)?;
+                let dependencies = ids
+                    .iter()
+                    .map(|id| WorkshopItem {
+                        id: id.clone(),
+                        title: meta.get(id).map(|item| item.title.clone()),
+                        available: true,
+                        manually_added: true,
+                    })
+                    .collect();
+                Ok((profile_id, result, dependencies, meta))
+            })();
+            let _ = tx.send(result);
+            repaint.request_repaint();
+        });
+    }
+
+    fn poll_add(&mut self, ctx: &egui::Context) {
+        let Some(result) = self.add_rx.as_ref().and_then(|rx| rx.try_recv().ok()) else {
+            return;
+        };
+        self.add_rx = None;
+        match result {
+            Ok((profile_id, result, dependencies, meta)) => {
+                self.meta.extend(meta);
+                let _ = workshop::save_meta(&self.dir, &self.meta);
+                if let Some(index) = self.profiles.iter().position(|p| p.id == profile_id) {
+                    let profile = &mut self.profiles[index];
+                    let mut present: HashSet<String> = profile
+                        .workshop
+                        .items
+                        .iter()
+                        .map(|item| item.id.clone())
+                        .collect();
+                    let root = WorkshopItem {
+                        id: result.id,
+                        title: Some(result.meta.title),
+                        available: true,
+                        manually_added: true,
+                    };
+                    let mut count = 0;
+                    for item in std::iter::once(root).chain(dependencies) {
+                        if present.insert(item.id.clone()) {
+                            profile.workshop.items.push(item);
+                            count += 1;
+                        }
+                    }
+                    if count > 0 {
+                        profile.sync.addons = true;
+                        if self.selected == index {
+                            self.review = None;
+                        }
+                    }
+                    let saved = core::save_profile(&self.dir, profile);
+                    self.notify(
+                        ctx,
+                        saved.map(|_| {
+                            format!(
+                                "Added {count} mod{}; Steam downloads missing mods on Play.",
+                                if count == 1 { "" } else { "s" }
+                            )
+                        }),
+                    );
                 }
             }
             Err(e) => self.notify(ctx, Err(e)),
@@ -1353,7 +1508,10 @@ impl App {
                 });
                 ui.add_space(4.0);
                 if ui
-                    .add(primary_button("▶  Play").min_size(vec2(112.0, 36.0)))
+                    .add_enabled(
+                        !self.busy(),
+                        primary_button("▶  Play").min_size(vec2(112.0, 36.0)),
+                    )
                     .on_hover_text("Apply this preset and start Garry's Mod")
                     .clicked()
                 {
@@ -1478,6 +1636,10 @@ impl App {
                 filter.is_empty()
                     || item.id.contains(&filter)
                     || self.title_of(item).to_lowercase().contains(&filter)
+                    || self
+                        .author_of(self.meta.get(&item.id))
+                        .to_lowercase()
+                        .contains(&filter)
             })
             .map(|item| {
                 let meta = self.meta.get(&item.id);
@@ -1485,6 +1647,7 @@ impl App {
                     id: item.id.clone(),
                     title: self.title_of(item).to_owned(),
                     size: meta.map(|m| m.size).filter(|s| *s > 0),
+                    author: self.author_of(meta).to_owned(),
                     state: self.mod_state(item),
                     url: meta.map(|m| m.preview_url.clone()).unwrap_or_default(),
                 }
@@ -1553,7 +1716,11 @@ impl App {
         paint_line(
             ui,
             pos2(text_left + 11.0, rect.top() + 27.0),
-            state_text,
+            &if row.author.is_empty() {
+                state_text.to_owned()
+            } else {
+                format!("by {} · {state_text}", row.author)
+            },
             FontId::proportional(12.0),
             MUTED,
             width,
@@ -1627,6 +1794,12 @@ impl App {
                         self.search(ctx, 1);
                     }
                 });
+                if self.add_rx.is_some() {
+                    ui.horizontal(|ui| {
+                        ui.add(egui::Spinner::new().size(14.0));
+                        ui.label("Checking required mods…");
+                    });
+                }
                 if self.results.is_empty() {
                     return;
                 }
@@ -1677,11 +1850,20 @@ impl App {
                             paint_line(
                                 ui,
                                 pos2(left, rect.top() + 25.0),
-                                &format!(
-                                    "{} · {} subscribers",
-                                    format_size(result.meta.size),
-                                    compact_number(result.meta.subscribers)
-                                ),
+                                &if self.author_of(Some(&result.meta)).is_empty() {
+                                    format!(
+                                        "{} · {} subscribers",
+                                        format_size(result.meta.size),
+                                        compact_number(result.meta.subscribers)
+                                    )
+                                } else {
+                                    format!(
+                                        "by {} · {} · {} subscribers",
+                                        self.author_of(Some(&result.meta)),
+                                        format_size(result.meta.size),
+                                        compact_number(result.meta.subscribers)
+                                    )
+                                },
                                 FontId::proportional(12.0),
                                 FAINT,
                                 width,
@@ -1696,10 +1878,9 @@ impl App {
                                 button,
                                 egui::Button::new(if added { "Added" } else { "Add" })
                                     .selected(added),
-                                true,
+                                self.add_rx.is_none() && !added,
                             )
                             .clicked()
-                                && !added
                             {
                                 add = Some(result.clone());
                             }
@@ -1716,14 +1897,7 @@ impl App {
                         }
                     });
                 if let Some(result) = add {
-                    self.profile_mut().workshop.items.push(WorkshopItem {
-                        id: result.id,
-                        title: Some(result.meta.title),
-                        available: true,
-                        manually_added: true,
-                    });
-                    self.profile_mut().sync.addons = true;
-                    self.touch(ctx);
+                    self.start_add(ctx, result);
                 }
             });
     }
@@ -2506,11 +2680,14 @@ impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.icons.poll(ctx);
         self.poll_meta();
+        self.poll_authors();
         self.poll_search(ctx);
+        self.poll_add(ctx);
         self.poll_refresh(ctx);
         self.poll_job(ctx);
         self.poll_update(ctx);
         self.ensure_meta(ctx);
+        self.ensure_authors(ctx);
         self.autosave(ctx);
         let now = ctx.input(|i| i.time);
         if now - self.last_scan > 5.0 && self.job.is_none() {
@@ -2518,7 +2695,11 @@ impl eframe::App for App {
             self.rescan();
         }
         ctx.request_repaint_after(Duration::from_secs(5));
-        if self.job.is_some() || self.search_rx.is_some() || self.refresh_rx.is_some() {
+        if self.job.is_some()
+            || self.search_rx.is_some()
+            || self.refresh_rx.is_some()
+            || self.add_rx.is_some()
+        {
             ctx.request_repaint_after(Duration::from_millis(100));
         }
         self.sidebar(ctx);

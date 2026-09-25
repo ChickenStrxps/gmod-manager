@@ -432,23 +432,19 @@ pub fn search_workshop(query: &str, page: usize) -> Result<Vec<WorkshopSearchIte
     let ids = if let Some(id) = direct_id {
         vec![id]
     } else {
-        let html = agent
-            .get("https://steamcommunity.com/workshop/browse/")
-            .query("appid", "4000")
-            .query("searchtext", query)
-            .query("browsesort", "textsearch")
-            .query("section", "readytouseitems")
-            .query("p", &page.to_string())
-            .call()
-            .map_err(|e| format!("Workshop search failed: {e}"))?
-            .into_string()
-            .map_err(|e| e.to_string())?;
+        let url = format!(
+            "https://steamcommunity.com/workshop/browse/?appid=4000&searchtext={}&browsesort=textsearch&section=readytouseitems&p={page}",
+            percent_encode(query)
+        );
+        let html = workshop::community_page(&agent, &url)
+            .map_err(|e| format!("Workshop search failed: {e}"))?;
         workshop_ids_from_search_html(&html)
     };
     if ids.is_empty() {
         return Ok(Vec::new());
     }
     let details = workshop::fetch_details(&agent, &ids)?;
+
     let mut found = workshop::parse_details(&details);
     let apps: HashMap<String, u64> = details["response"]["publishedfiledetails"]
         .as_array()
@@ -474,6 +470,16 @@ pub fn search_workshop(query: &str, page: usize) -> Result<Vec<WorkshopSearchIte
         .collect())
 }
 
+fn percent_encode(text: &str) -> String {
+    text.bytes()
+        .map(|b| match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                (b as char).to_string()
+            }
+            _ => format!("%{b:02X}"),
+        })
+        .collect()
+}
 pub fn validate_profile(profile: &Profile) -> Result<(), String> {
     if profile.schema_version != 1 {
         return Err("Unsupported profile schema version.".into());

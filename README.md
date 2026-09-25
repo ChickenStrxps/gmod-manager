@@ -12,7 +12,7 @@ You need Steam and Garry's Mod installed. The app updates itself.
 ## Use
 
 - **Play** applies the preset and starts GMod. Missing mods download when GMod opens.
-- **Mods** – add mods from the Workshop, remove them, see their sizes.
+- **Mods** – find mods on the Workshop, see their authors and sizes. Required mods are added with them and download on Play.
 - **Binds / Settings** – keybinds and console settings that come with the preset.
 - **… → Share as file** – send a preset to a friend. They add it with **Import**.
 - **… → Undo last apply** – puts your GMod files back.
