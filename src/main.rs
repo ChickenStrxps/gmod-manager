@@ -238,9 +238,12 @@ struct App {
     refresh_rx: Option<
         Receiver<Result<(String, Profile, usize, usize, HashMap<String, ItemMeta>), String>>,
     >,
+    collection_rx: Option<Receiver<Result<(Profile, HashMap<String, ItemMeta>), String>>>,
 
     job: Option<Job>,
     new_preset: Option<String>,
+    import_link: Option<String>,
+    import_error: Option<String>,
     review: Option<Result<core::Prepared, String>>,
     update: Option<update::Release>,
     update_rx: Option<Receiver<Result<Option<update::Release>, String>>>,
@@ -309,8 +312,11 @@ impl App {
             page: 1,
             search_rx: None,
             refresh_rx: None,
+            collection_rx: None,
             job: None,
             new_preset: None,
+            import_link: None,
+            import_error: None,
             review: None,
             update: None,
             update_rx: None,
@@ -1182,6 +1188,33 @@ impl App {
         }
     }
 
+    fn save_imported_profile(&mut self, ctx: &egui::Context, mut profile: Profile) -> bool {
+        if self.profiles.iter().any(|p| p.id == profile.id) {
+            let base = profile.id.clone();
+            let mut n = 2;
+            while self.profiles.iter().any(|p| p.id == format!("{base}-{n}")) {
+                n += 1;
+            }
+            profile.id = format!("{base}-{n}");
+            profile.name = format!("{} ({n})", profile.name);
+        }
+        match core::save_profile(&self.dir, &profile) {
+            Ok(()) => {
+                let name = profile.name.clone();
+                self.profiles.push(profile);
+                self.select(self.profiles.len() - 1);
+                self.tab = Tab::Mods;
+                self.import_link = None;
+                self.notify(ctx, Ok(format!("Imported {name}.")));
+                true
+            }
+            Err(error) => {
+                self.notify(ctx, Err(format!("Import failed: {error}")));
+                false
+            }
+        }
+    }
+
     fn import_preset(&mut self, ctx: &egui::Context) {
         let Some(path) = rfd::FileDialog::new()
             .add_filter("GMod Manager preset", &["zip", "json"])
@@ -1190,27 +1223,47 @@ impl App {
             return;
         };
         match core::import_preset_file(&path) {
-            Ok(mut profile) => {
-                if self.profiles.iter().any(|p| p.id == profile.id) {
-                    let base = profile.id.clone();
-                    let mut n = 2;
-                    while self.profiles.iter().any(|p| p.id == format!("{base}-{n}")) {
-                        n += 1;
-                    }
-                    profile.id = format!("{base}-{n}");
-                    profile.name = format!("{} ({n})", profile.name);
-                }
-                match core::save_profile(&self.dir, &profile) {
-                    Ok(()) => {
-                        let name = profile.name.clone();
-                        self.profiles.push(profile);
-                        self.select(self.profiles.len() - 1);
-                        self.notify(ctx, Ok(format!("Imported {name}.")));
-                    }
-                    Err(e) => self.notify(ctx, Err(e)),
+            Ok(profile) => {
+                self.save_imported_profile(ctx, profile);
+            }
+            Err(error) => self.notify(ctx, Err(format!("Import failed: {error}"))),
+        }
+    }
+
+    fn start_import_collection(&mut self, ctx: &egui::Context, link: String) {
+        if self.collection_rx.is_some() {
+            return;
+        }
+        self.import_error = None;
+        let (tx, rx) = mpsc::channel();
+        self.collection_rx = Some(rx);
+        let repaint = ctx.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send(core::import_collection(&link));
+            repaint.request_repaint();
+        });
+    }
+
+    fn poll_import_collection(&mut self, ctx: &egui::Context) {
+        let Some(result) = self
+            .collection_rx
+            .as_ref()
+            .and_then(|rx| rx.try_recv().ok())
+        else {
+            return;
+        };
+        self.collection_rx = None;
+        match result {
+            Ok((profile, meta)) => {
+                if self.save_imported_profile(ctx, profile) {
+                    self.meta.extend(meta);
+                    let _ = workshop::save_meta(&self.dir, &self.meta);
                 }
             }
-            Err(e) => self.notify(ctx, Err(format!("Import failed: {e}"))),
+            Err(error) => {
+                self.import_error = Some(error.clone());
+                self.notify(ctx, Err(format!("Collection import failed: {error}")));
+            }
         }
     }
 
@@ -1377,15 +1430,16 @@ impl App {
                                 egui::Button::new(RichText::new("Import").size(12.0).color(MUTED))
                                     .frame(false),
                             )
-                            .on_hover_text("Open a preset file someone shared")
+                            .on_hover_text("Import a preset file or a Steam collection link")
                             .clicked()
                         {
-                            self.import_preset(ctx);
+                            self.import_link = Some(String::new());
+                            self.import_error = None;
                         }
                     });
                 });
                 ui.add_space(4.0);
-                let bottom_space = if self.update.is_some() { 150.0 } else { 110.0 };
+                let bottom_space = if self.update.is_some() { 190.0 } else { 150.0 };
                 let mut clicked = None;
                 egui::ScrollArea::vertical()
                     .max_height((ui.available_height() - bottom_space).max(60.0))
@@ -1414,6 +1468,22 @@ impl App {
                             .size(12.0)
                             .color(MUTED),
                         );
+                    });
+                    ui.add_space(8.0);
+                    ui.horizontal(|ui| {
+                        ui.add_space(8.0);
+                        ui.label(
+                            RichText::new("Made by ChickenOnAStrip")
+                                .size(12.0)
+                                .color(MUTED),
+                        );
+                        if ui
+                            .link(RichText::new("GitHub").size(12.0).color(ACCENT))
+                            .on_hover_text("Open the GMod Manager repository")
+                            .clicked()
+                        {
+                            self.open_link(ctx, &format!("https://github.com/{}", update::REPO));
+                        }
                     });
                     ui.add_space(8.0);
                     if let Some(version) = self.update.as_ref().map(|r| r.version.clone()) {
@@ -2645,6 +2715,72 @@ impl App {
         });
     }
 
+    fn import_modal(&mut self, ctx: &egui::Context) {
+        let Some(mut link) = self.import_link.take() else {
+            return;
+        };
+        let busy = self.collection_rx.is_some();
+        let mut action = None;
+        let modal = egui::Modal::new(Id::new("import-preset"))
+            .frame(modal_frame())
+            .show(ctx, |ui| {
+                ui.set_width(450.0);
+                ui.label(semibold("Import preset", 18.0));
+                ui.add_space(8.0);
+                ui.label("Paste a public Garry's Mod Steam collection link or ID:");
+                let edit = ui.add_enabled(
+                    !busy,
+                    egui::TextEdit::singleline(&mut link)
+                        .hint_text("https://steamcommunity.com/sharedfiles/filedetails/?id=…")
+                        .desired_width(f32::INFINITY),
+                );
+                if !busy {
+                    edit.request_focus();
+                }
+                if let Some(error) = &self.import_error {
+                    ui.label(RichText::new(error).size(12.0).color(RED));
+                }
+                ui.add_space(12.0);
+                ui.horizontal(|ui| {
+                    if busy {
+                        ui.add(egui::Spinner::new().size(16.0));
+                        ui.label("Loading collection from Steam…");
+                    } else {
+                        if ui
+                            .add_enabled(
+                                !link.trim().is_empty(),
+                                primary_button("Import collection"),
+                            )
+                            .clicked()
+                        {
+                            action = Some("link");
+                        }
+                        if ui.add(soft_button("Choose preset file…")).clicked() {
+                            action = Some("file");
+                        }
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            if ui.add(soft_button("Cancel")).clicked() {
+                                action = Some("cancel");
+                            }
+                        });
+                    }
+                });
+            });
+        match action {
+            Some("link") => {
+                self.import_link = Some(link.clone());
+                self.start_import_collection(ctx, link);
+            }
+            Some("file") => {
+                self.import_link = Some(link);
+                self.import_preset(ctx);
+            }
+            Some("cancel") => self.import_error = None,
+            None if modal.should_close() && !busy => self.import_error = None,
+            _ => self.import_link = Some(link),
+        }
+    }
+
     fn new_preset_modal(&mut self, ctx: &egui::Context) {
         let Some(mut name) = self.new_preset.take() else {
             return;
@@ -2837,6 +2973,7 @@ impl eframe::App for App {
         self.poll_requirements(ctx);
         self.poll_refresh(ctx);
         self.poll_job(ctx);
+        self.poll_import_collection(ctx);
         self.poll_update(ctx);
         self.ensure_meta(ctx);
         if self.view == View::Preset {
@@ -2854,6 +2991,7 @@ impl eframe::App for App {
             || self.search_rx.is_some()
             || self.refresh_rx.is_some()
             || self.requirements.is_some()
+            || self.collection_rx.is_some()
         {
             ctx.request_repaint_after(Duration::from_millis(100));
         }
@@ -2875,6 +3013,7 @@ impl eframe::App for App {
                 }
             });
         self.new_preset_modal(ctx);
+        self.import_modal(ctx);
         self.review_modal(ctx);
         self.toast(ctx);
     }

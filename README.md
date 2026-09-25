@@ -14,7 +14,8 @@ You need Steam and Garry's Mod installed. The app updates itself.
 - **Play** applies the preset and starts GMod. Missing mods download when GMod opens.
 - **Mods** – find mods on the Workshop, see their authors and sizes. Discovery saves the mod to the preset immediately, even if Steam rate-limits its separate required-mod check. Missing mods download on Play; use **Check required mods** to retry a failed check.
 - **Binds / Settings** – keybinds and console settings that come with the preset.
-- **… → Share as file** – send a preset to a friend. They add it with **Import**.
+- **Import** – paste a public Garry's Mod Steam collection link or ID to create a preset with its mods; use **Details → Update mods from collection** to refresh it. Or choose a shared preset ZIP/JSON.
+- **… → Share as file** – send a preset ZIP to a friend; they open it through **Import**.
 - **… → Undo last apply** – puts your GMod files back.
 
 ## Library

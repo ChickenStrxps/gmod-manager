@@ -354,6 +354,55 @@ pub fn capture_selected_settings(game: &Path, settings: &mut [Setting]) -> Resul
     Ok(count)
 }
 
+fn collection_id_from_input(input: &str) -> Result<String, String> {
+    let input = input.trim();
+    let id = if input.bytes().all(|b| b.is_ascii_digit()) {
+        input
+    } else {
+        let path = input
+            .strip_prefix("https://steamcommunity.com/")
+            .ok_or("Paste a Steam Community collection link or a numeric collection ID.")?;
+        let query = path
+            .strip_prefix("sharedfiles/filedetails/?")
+            .or_else(|| path.strip_prefix("workshop/filedetails/?"))
+            .ok_or("Paste a Steam Community collection link or a numeric collection ID.")?;
+        query
+            .split('#')
+            .next()
+            .unwrap_or_default()
+            .split('&')
+            .find_map(|part| part.strip_prefix("id="))
+            .unwrap_or_default()
+    };
+    if id.is_empty() || !id.bytes().all(|b| b.is_ascii_digit()) {
+        return Err("Steam collection link needs a numeric id.".into());
+    }
+    Ok(id.to_owned())
+}
+
+/// Build a new preset from a public Garry's Mod Workshop collection.
+pub fn import_collection(input: &str) -> Result<(Profile, HashMap<String, ItemMeta>), String> {
+    let id = collection_id_from_input(input)?;
+    let agent = workshop::agent();
+    let details = workshop::fetch_details(&agent, std::slice::from_ref(&id))?;
+    let item = &details["response"]["publishedfiledetails"][0];
+    if item["result"].as_i64() != Some(1) {
+        return Err("Steam couldn't access that collection. It may be private, removed, or an invalid link.".into());
+    }
+    if item["consumer_app_id"].as_u64() != Some(4000) {
+        return Err("That collection is not for Garry's Mod.".into());
+    }
+    let title = item["title"]
+        .as_str()
+        .map(str::trim)
+        .filter(|title| !title.is_empty())
+        .ok_or("Steam did not return a collection title.")?;
+    let mut profile = Profile::blank(title, &format!("steam-collection-{id}"));
+    profile.workshop.collection_id = id;
+    let (_, _, meta) = refresh_collection(&mut profile)?;
+    Ok((profile, meta))
+}
+
 pub fn refresh_collection(
     profile: &mut Profile,
 ) -> Result<(usize, usize, HashMap<String, ItemMeta>), String> {
@@ -1431,6 +1480,36 @@ mod tests {
     fn workshop_search_parser_keeps_unique_result_ids() {
         let html = r#"<a href="https://steamcommunity.com/sharedfiles/filedetails/?id=123">One</a><a href="https://steamcommunity.com/sharedfiles/filedetails/?id=123">One again</a><a href="https://steamcommunity.com/sharedfiles/filedetails/?id=456">Two</a>"#;
         assert_eq!(workshop_ids_from_search_html(html), vec!["123", "456"]);
+    }
+
+    #[test]
+    fn collection_links_accept_steam_paths_but_reject_other_sites_and_invalid_ids() {
+        assert_eq!(
+            collection_id_from_input(
+                "https://steamcommunity.com/sharedfiles/filedetails/?id=3807457886"
+            )
+            .unwrap(),
+            "3807457886"
+        );
+        assert_eq!(
+            collection_id_from_input(
+                "https://steamcommunity.com/workshop/filedetails/?searchtext=mods&id=3428047388"
+            )
+            .unwrap(),
+            "3428047388"
+        );
+        assert_eq!(
+            collection_id_from_input(" 3428047388 ").unwrap(),
+            "3428047388"
+        );
+        for invalid in [
+            "https://notsteamcommunity.com/sharedfiles/filedetails/?id=3428047388",
+            "https://steamcommunity.com/sharedfiles/filedetails/?id=abc",
+            "https://steamcommunity.com/profiles/?id=3428047388",
+            "",
+        ] {
+            assert!(collection_id_from_input(invalid).is_err(), "{invalid}");
+        }
     }
 
     #[test]
