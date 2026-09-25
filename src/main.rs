@@ -3,6 +3,8 @@
 mod core;
 mod library;
 mod model;
+#[cfg(feature = "promo")]
+mod promo;
 mod update;
 mod workshop;
 
@@ -38,6 +40,8 @@ const AMBER: Color32 = Color32::from_rgb(224, 166, 74);
 const RED: Color32 = Color32::from_rgb(232, 92, 96);
 
 const ROW_HEIGHT: f32 = 50.0;
+/// Pause after the last keystroke before the discovery box searches on its own.
+const SEARCH_DEBOUNCE: f64 = 0.3;
 const WORKSHOP_ITEM: &str = "https://steamcommunity.com/sharedfiles/filedetails/?id=";
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -234,6 +238,13 @@ struct App {
     results_query: String,
     page: usize,
     search_rx: Option<Receiver<Result<(String, usize, Vec<core::WorkshopSearchItem>), String>>>,
+    /// When the discovery query last changed and still needs a search; `NEG_INFINITY` runs it at once.
+    query_edited_at: Option<f64>,
+    /// When the current first page of results arrived, for their entrance animation.
+    results_at: f64,
+    /// What the main panel shows; a change restarts `content_at`, the fade-in start.
+    content_key: (View, usize, Tab),
+    content_at: f64,
     refresh_rx: Option<
         Receiver<Result<(String, Profile, usize, usize, HashMap<String, ItemMeta>), String>>,
     >,
@@ -247,6 +258,8 @@ struct App {
     update: Option<update::Release>,
     update_rx: Option<Receiver<Result<Option<update::Release>, String>>>,
     update_manual: bool,
+    #[cfg(feature = "promo")]
+    promo: promo::Promo,
 }
 
 impl App {
@@ -309,6 +322,10 @@ impl App {
             results_query: String::new(),
             page: 1,
             search_rx: None,
+            query_edited_at: None,
+            results_at: 0.0,
+            content_key: (View::Preset, selected, Tab::Mods),
+            content_at: 0.0,
             refresh_rx: None,
             collection_rx: None,
             job: None,
@@ -319,10 +336,13 @@ impl App {
             update: None,
             update_rx: None,
             update_manual: false,
+            #[cfg(feature = "promo")]
+            promo: promo::Promo::start(),
         };
         app.rescan();
         update::cleanup();
-        if !cfg!(debug_assertions) {
+        // Recording builds stay on the version being filmed.
+        if !cfg!(debug_assertions) && !cfg!(feature = "promo") {
             app.check_updates(&cc.egui_ctx, false);
         }
         app
@@ -412,6 +432,7 @@ impl App {
         self.review = None;
         self.results.clear();
         self.results_query.clear();
+        self.query_edited_at = None;
         self.filter.clear();
         self.save_error = None;
         self.remember();
@@ -893,6 +914,23 @@ impl App {
         });
     }
 
+    /// Runs the pending as-you-type search once typing pauses and no search is in flight.
+    fn live_search(&mut self, ctx: &egui::Context) {
+        let Some(edited) = self.query_edited_at else {
+            return;
+        };
+        let wait = edited + SEARCH_DEBOUNCE - ctx.input(|i| i.time);
+        if wait > 0.0 {
+            ctx.request_repaint_after(Duration::from_secs_f64(wait));
+            return;
+        }
+        // A search in flight repaints when it finishes; the newest query runs then.
+        if self.search_rx.is_none() {
+            self.query_edited_at = None;
+            self.search(ctx, 1);
+        }
+    }
+
     fn poll_search(&mut self, ctx: &egui::Context) {
         let Some(result) = self.search_rx.as_ref().and_then(|rx| rx.try_recv().ok()) else {
             return;
@@ -905,6 +943,7 @@ impl App {
                 }
                 if page == 1 {
                     self.results = items;
+                    self.results_at = ctx.input(|i| i.time);
                 } else {
                     let known: HashSet<String> =
                         self.results.iter().map(|r| r.id.clone()).collect();
@@ -913,9 +952,6 @@ impl App {
                 }
                 self.results_query = query;
                 self.page = page;
-                if self.results.is_empty() {
-                    self.notify(ctx, Ok("No mods found.".into()));
-                }
             }
             Err(e) => self.notify(ctx, Err(e)),
         }
@@ -1514,15 +1550,21 @@ impl App {
         let (rect, response) =
             ui.allocate_exact_size(vec2(ui.available_width(), 50.0), Sense::click());
         let painter = ui.painter_at(rect);
-        if active {
-            painter.rect_filled(rect, 7.0, ROW);
+        let shown = ease_bool(ui, response.id.with("active"), active);
+        let hover = ease_bool(ui, response.id.with("hover"), response.hovered());
+        let fill = shown.max(hover * 0.6);
+        if fill > 0.0 {
+            painter.rect_filled(rect, 7.0, ROW.gamma_multiply(fill));
+        }
+        if shown > 0.0 {
             painter.rect_filled(
-                Rect::from_min_size(rect.min + vec2(0.0, 12.0), vec2(3.0, rect.height() - 24.0)),
+                Rect::from_center_size(
+                    pos2(rect.left() + 1.5, rect.center().y),
+                    vec2(3.0, (rect.height() - 24.0) * shown),
+                ),
                 2.0,
                 ACCENT,
             );
-        } else if response.hovered() {
-            painter.rect_filled(rect, 7.0, ROW.gamma_multiply(0.6));
         }
         let profile = &self.profiles[index];
         let first = profile
@@ -1667,11 +1709,22 @@ impl App {
                     }
                 });
                 ui.add_space(4.0);
-                if ui
-                    .add_enabled(
-                        !self.busy(),
-                        primary_button("▶  Play").min_size(vec2(112.0, 36.0)),
-                    )
+                let play = ui.add_enabled(
+                    !self.busy(),
+                    primary_button("▶  Play").min_size(vec2(112.0, 36.0)),
+                );
+                let glow = ease_bool(ui, play.id.with("glow"), play.hovered() && play.enabled());
+                if glow > 0.0 {
+                    for (grow, alpha) in [(2.0, 0.45), (5.0, 0.18)] {
+                        ui.painter().rect_stroke(
+                            play.rect.expand(grow * glow),
+                            4.0 + grow,
+                            Stroke::new(2.0, ACCENT.gamma_multiply(alpha * glow)),
+                            egui::StrokeKind::Outside,
+                        );
+                    }
+                }
+                if play
                     .on_hover_text("Apply this preset and start Garry's Mod")
                     .clicked()
                 {
@@ -1702,32 +1755,39 @@ impl App {
             (Tab::Details, "Details".to_owned()),
         ];
         let top = ui.cursor().top();
+        let mut underline = None;
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 22.0;
             for (tab, label) in tabs {
                 let active = self.tab == tab;
+                let shown = ease_bool(ui, Id::new(("tab-active", tab as u8)), active);
                 let response = ui
                     .add(
-                        egui::Label::new(RichText::new(label).size(14.0).color(if active {
-                            TEXT
-                        } else {
-                            MUTED
-                        }))
+                        egui::Label::new(
+                            RichText::new(label)
+                                .size(14.0)
+                                .color(lerp_color(MUTED, TEXT, shown)),
+                        )
                         .sense(Sense::click()),
                     )
                     .on_hover_cursor(egui::CursorIcon::PointingHand);
                 if active {
-                    ui.painter().hline(
-                        response.rect.x_range(),
-                        response.rect.bottom() + 7.0,
-                        Stroke::new(2.0, ACCENT),
-                    );
+                    underline = Some((response.rect.x_range(), response.rect.bottom() + 7.0));
                 }
                 if response.clicked() {
                     self.tab = tab;
                 }
             }
         });
+        if let Some((range, y)) = underline {
+            // The underline glides to the chosen tab instead of jumping.
+            let ctx = ui.ctx();
+            let left = ctx.animate_value_with_time(Id::new("tab-underline-left"), range.min, 0.18);
+            let right =
+                ctx.animate_value_with_time(Id::new("tab-underline-right"), range.max, 0.18);
+            ui.painter()
+                .hline(left..=right, y, Stroke::new(2.0, ACCENT));
+        }
         let y = ui.cursor().top().max(top + 26.0) + 1.0;
         ui.painter()
             .hline(ui.max_rect().x_range(), y, Stroke::new(1.0, LINE));
@@ -1880,12 +1940,22 @@ impl App {
             return;
         }
         let mut remove = None;
+        let since = self.content_at;
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
             .show_rows(ui, ROW_HEIGHT, rows.len(), |ui, range| {
                 ui.spacing_mut().item_spacing.y = 0.0;
-                for row in &rows[range] {
-                    if self.mod_row(ui, ctx, row) {
+                for (shown, row) in rows[range].iter().enumerate() {
+                    // Rows settle in one after another when the list first appears.
+                    let delay = (shown as f64 * 0.025).min(0.3);
+                    let alpha = entrance(ui, since, delay, 0.22);
+                    let removed = ui
+                        .scope(|ui| {
+                            ui.multiply_opacity(alpha);
+                            self.mod_row(ui, ctx, row)
+                        })
+                        .inner;
+                    if removed {
                         remove = Some(row.id.clone());
                     }
                 }
@@ -1904,9 +1974,10 @@ impl App {
         let (rect, response) =
             ui.allocate_exact_size(vec2(ui.available_width(), ROW_HEIGHT), Sense::click());
         let hovered = ui.rect_contains_pointer(rect);
-        if hovered {
+        let hover = ease_bool(ui, response.id.with("hover"), hovered);
+        if hover > 0.0 {
             ui.painter()
-                .rect_filled(rect.shrink2(vec2(0.0, 2.0)), 7.0, ROW);
+                .rect_filled(rect.shrink2(vec2(0.0, 2.0)), 7.0, ROW.gamma_multiply(hover));
         }
         let icon = Rect::from_min_size(rect.min + vec2(8.0, 7.0), vec2(36.0, 36.0));
         self.draw_icon(ui, icon, &row.id, &row.url, &row.title, 5);
@@ -2000,12 +2071,22 @@ impl App {
                             .desired_width(ui.available_width() - 100.0),
                     );
                     let enter = edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                    if edit.changed() {
+                        if self.query.trim().is_empty() {
+                            self.query_edited_at = None;
+                            self.results.clear();
+                            self.results_query.clear();
+                        } else {
+                            self.query_edited_at = Some(ui.input(|i| i.time));
+                        }
+                    }
                     if self.search_rx.is_some() {
                         ui.add(egui::Spinner::new().size(18.0));
                     } else if ui.add(primary_button("Search")).clicked() || enter {
-                        self.search(ctx, 1);
+                        self.query_edited_at = Some(f64::NEG_INFINITY);
                     }
                 });
+                self.live_search(ctx);
                 if self
                     .requirements
                     .as_ref()
@@ -2017,10 +2098,24 @@ impl App {
                             .color(MUTED),
                     );
                 }
-                if self.results.is_empty() {
+                let query = self.query.trim();
+                let no_match = self.results.is_empty()
+                    && !self.results_query.is_empty()
+                    && self.results_query == query;
+                let stale = self.results_query != query;
+                let open = ctx.animate_bool_with_time(
+                    ui.id().with("results-open"),
+                    !self.results.is_empty() || no_match,
+                    0.2,
+                );
+                if open == 0.0 {
                     return;
                 }
-                ui.add_space(8.0);
+                ui.add_space(8.0 * open);
+                if no_match {
+                    ui.label(RichText::new("No mods found.").size(12.0).color(MUTED));
+                    return;
+                }
                 let present: HashMap<String, bool> = self
                     .profile()
                     .workshop
@@ -2029,69 +2124,90 @@ impl App {
                     .map(|item| (item.id.clone(), item.available))
                     .collect();
                 let mut add = None;
-                egui::ScrollArea::vertical()
-                    .id_salt("search-results")
-                    .max_height(280.0)
-                    .auto_shrink([false, true])
-                    .show(ui, |ui| {
-                        ui.spacing_mut().item_spacing.y = 0.0;
-                        for index in 0..self.results.len() {
-                            let result = self.results[index].clone();
-                            let (rect, response) = ui.allocate_exact_size(
-                                vec2(ui.available_width(), 46.0),
-                                Sense::click(),
-                            );
-                            if ui.rect_contains_pointer(rect) {
-                                ui.painter().rect_filled(rect, 6.0, ROW_HOVER);
-                            }
-                            let icon =
-                                Rect::from_min_size(rect.min + vec2(6.0, 7.0), vec2(32.0, 32.0));
-                            self.draw_icon(
-                                ui,
-                                icon,
-                                &result.id,
-                                &result.meta.preview_url,
-                                &result.meta.title,
-                                5,
-                            );
-                            let left = icon.right() + 10.0;
-                            let width = rect.right() - left - 110.0;
-                            paint_line(
-                                ui,
-                                pos2(left, rect.top() + 6.0),
-                                &result.meta.title,
-                                FontId::proportional(14.0),
-                                TEXT,
-                                width,
-                            );
-                            paint_line(
-                                ui,
-                                pos2(left, rect.top() + 25.0),
-                                &if self.author_of(Some(&result.meta)).is_empty() {
-                                    format!(
-                                        "{} · {} subscribers",
-                                        format_size(result.meta.size),
-                                        compact_number(result.meta.subscribers)
-                                    )
-                                } else {
-                                    format!(
-                                        "by {} · {} · {} subscribers",
-                                        self.author_of(Some(&result.meta)),
-                                        format_size(result.meta.size),
-                                        compact_number(result.meta.subscribers)
-                                    )
-                                },
-                                FontId::proportional(12.0),
-                                FAINT,
-                                width,
-                            );
-                            let button = Rect::from_min_size(
-                                pos2(rect.right() - 86.0, rect.center().y - 14.0),
-                                vec2(78.0, 28.0),
-                            );
-                            let state = present.get(&result.id).copied();
-                            let added = state == Some(true);
-                            if put_free(
+                let since = self.results_at;
+                ui.scope(|ui| {
+                    // Results for an older query stay readable, faded, until the new ones land.
+                    if stale {
+                        ui.multiply_opacity(0.5);
+                    }
+                    egui::ScrollArea::vertical()
+                        .id_salt("search-results")
+                        .max_height(280.0 * open)
+                        .auto_shrink([false, true])
+                        .show(ui, |ui| {
+                            ui.spacing_mut().item_spacing.y = 0.0;
+                            for index in 0..self.results.len() {
+                                let result = self.results[index].clone();
+                                let alpha =
+                                    entrance(ui, since, (index.min(12) as f64) * 0.025, 0.2);
+                                ui.scope(|ui| {
+                                    ui.multiply_opacity(alpha);
+                                    let (rect, response) = ui.allocate_exact_size(
+                                        vec2(ui.available_width(), 46.0),
+                                        Sense::click(),
+                                    );
+                                    let hover = ease_bool(
+                                        ui,
+                                        response.id.with("hover"),
+                                        ui.rect_contains_pointer(rect),
+                                    );
+                                    if hover > 0.0 {
+                                        ui.painter().rect_filled(
+                                            rect,
+                                            6.0,
+                                            ROW_HOVER.gamma_multiply(hover),
+                                        );
+                                    }
+                                    let icon = Rect::from_min_size(
+                                        rect.min + vec2(6.0, 7.0),
+                                        vec2(32.0, 32.0),
+                                    );
+                                    self.draw_icon(
+                                        ui,
+                                        icon,
+                                        &result.id,
+                                        &result.meta.preview_url,
+                                        &result.meta.title,
+                                        5,
+                                    );
+                                    let left = icon.right() + 10.0;
+                                    let width = rect.right() - left - 110.0;
+                                    paint_line(
+                                        ui,
+                                        pos2(left, rect.top() + 6.0),
+                                        &result.meta.title,
+                                        FontId::proportional(14.0),
+                                        TEXT,
+                                        width,
+                                    );
+                                    paint_line(
+                                        ui,
+                                        pos2(left, rect.top() + 25.0),
+                                        &if self.author_of(Some(&result.meta)).is_empty() {
+                                            format!(
+                                                "{} · {} subscribers",
+                                                format_size(result.meta.size),
+                                                compact_number(result.meta.subscribers)
+                                            )
+                                        } else {
+                                            format!(
+                                                "by {} · {} · {} subscribers",
+                                                self.author_of(Some(&result.meta)),
+                                                format_size(result.meta.size),
+                                                compact_number(result.meta.subscribers)
+                                            )
+                                        },
+                                        FontId::proportional(12.0),
+                                        FAINT,
+                                        width,
+                                    );
+                                    let button = Rect::from_min_size(
+                                        pos2(rect.right() - 86.0, rect.center().y - 14.0),
+                                        vec2(78.0, 28.0),
+                                    );
+                                    let state = present.get(&result.id).copied();
+                                    let added = state == Some(true);
+                                    if put_free(
                                 ui,
                                 button,
                                 egui::Button::new(if added {
@@ -2113,18 +2229,23 @@ impl App {
                             {
                                 add = Some(result.clone());
                             }
-                            if response.double_clicked() {
-                                self.open_link(ctx, &format!("{WORKSHOP_ITEM}{}", result.id));
+                                    if response.double_clicked() {
+                                        self.open_link(
+                                            ctx,
+                                            &format!("{WORKSHOP_ITEM}{}", result.id),
+                                        );
+                                    }
+                                });
                             }
-                        }
-                        if self.results.len() >= 30 * self.page && self.search_rx.is_none() {
-                            ui.add_space(6.0);
-                            if ui.add(soft_button("More results")).clicked() {
-                                self.query = self.results_query.clone();
-                                self.search(ctx, self.page + 1);
+                            if self.results.len() >= 30 * self.page && self.search_rx.is_none() {
+                                ui.add_space(6.0);
+                                if ui.add(soft_button("More results")).clicked() {
+                                    self.query = self.results_query.clone();
+                                    self.search(ctx, self.page + 1);
+                                }
                             }
-                        }
-                    });
+                        });
+                });
                 if let Some(result) = add {
                     self.add_discovery_mod(ctx, result);
                 }
@@ -3000,6 +3121,12 @@ impl eframe::App for App {
             ctx.request_repaint_after(Duration::from_millis(100));
         }
         self.sidebar(ctx);
+        let key = (self.view, self.selected, self.tab);
+        if key != self.content_key {
+            self.content_key = key;
+            self.content_at = now;
+        }
+        let since = self.content_at;
         egui::CentralPanel::default()
             .frame(Frame::new().fill(BG).inner_margin(Margin {
                 left: 28,
@@ -3007,19 +3134,32 @@ impl eframe::App for App {
                 top: 22,
                 bottom: 12,
             }))
-            .show(ctx, |ui| match self.view {
-                View::Preset => self.preset_view(ui, ctx),
-                View::Library => self.library_view(ui, ctx),
-                View::Settings => {
-                    egui::ScrollArea::vertical()
-                        .auto_shrink([false, false])
-                        .show(ui, |ui| self.settings_view(ui, ctx));
+            .show(ctx, |ui| {
+                // New pages drift up and fade in rather than popping.
+                let shown = entrance(ui, since, 0.0, 0.2);
+                ui.multiply_opacity(shown);
+                ui.add_space((1.0 - shown) * 10.0);
+                match self.view {
+                    View::Preset => self.preset_view(ui, ctx),
+                    View::Library => self.library_view(ui, ctx),
+                    View::Settings => {
+                        egui::ScrollArea::vertical()
+                            .auto_shrink([false, false])
+                            .show(ui, |ui| self.settings_view(ui, ctx));
+                    }
                 }
             });
         self.new_preset_modal(ctx);
         self.import_modal(ctx);
         self.review_modal(ctx);
         self.toast(ctx);
+        #[cfg(feature = "promo")]
+        self.promo.paint(ctx);
+    }
+
+    #[cfg(feature = "promo")]
+    fn raw_input_hook(&mut self, ctx: &egui::Context, raw_input: &mut egui::RawInput) {
+        self.promo.feed(ctx, raw_input);
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
@@ -3089,19 +3229,37 @@ fn icon_button(text: &str) -> egui::Button<'_> {
 
 fn nav_item(ui: &mut egui::Ui, text: &str, active: bool) -> egui::Response {
     let (rect, response) = ui.allocate_exact_size(vec2(ui.available_width(), 34.0), Sense::click());
-    if active {
-        ui.painter().rect_filled(rect, 7.0, ROW);
-    } else if response.hovered() {
-        ui.painter().rect_filled(rect, 7.0, ROW.gamma_multiply(0.6));
+    let shown = ease_bool(ui, response.id.with("active"), active);
+    let hover = ease_bool(ui, response.id.with("hover"), response.hovered());
+    let fill = shown.max(hover * 0.6);
+    if fill > 0.0 {
+        ui.painter()
+            .rect_filled(rect, 7.0, ROW.gamma_multiply(fill));
     }
     ui.painter().text(
         pos2(rect.left() + 12.0, rect.center().y),
         Align2::LEFT_CENTER,
         text,
         FontId::proportional(14.0),
-        if active { TEXT } else { MUTED },
+        lerp_color(MUTED, TEXT, shown),
     );
     response.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+/// Eased 0..1 for a highlight, so hover and selection fade instead of snapping.
+fn ease_bool(ui: &egui::Ui, id: Id, on: bool) -> f32 {
+    ui.ctx()
+        .animate_bool_with_time_and_easing(id, on, 0.16, egui::emath::easing::cubic_out)
+}
+
+/// Eased 0..1 progress of an entrance that began at `since`, after `delay` seconds.
+fn entrance(ui: &egui::Ui, since: f64, delay: f64, duration: f64) -> f32 {
+    let now = ui.input(|i| i.time);
+    let t = ((now - since - delay) / duration).clamp(0.0, 1.0) as f32;
+    if t < 1.0 {
+        ui.ctx().request_repaint();
+    }
+    egui::emath::easing::cubic_out(t)
 }
 
 fn dot(ui: &mut egui::Ui, color: Color32) {
@@ -3347,11 +3505,17 @@ fn collection_url(profile: &Profile) -> String {
 }
 
 fn main() -> eframe::Result {
+    let viewport = egui::ViewportBuilder::default()
+        .with_inner_size([1100.0, 720.0])
+        .with_min_inner_size([820.0, 540.0])
+        .with_title("GMod Manager");
+    // Recording builds open off screen without taking focus from whoever is at the PC.
+    #[cfg(feature = "promo")]
+    let viewport = viewport
+        .with_active(false)
+        .with_position([12000.0, 0.0]);
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_inner_size([1100.0, 720.0])
-            .with_min_inner_size([820.0, 540.0])
-            .with_title("GMod Manager"),
+        viewport,
         ..Default::default()
     };
     eframe::run_native(

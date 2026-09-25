@@ -2,6 +2,12 @@
 
 Manage Garry's Mod modpacks. Pick a preset, hit Play.
 
+## Preview
+
+[![Finding mods as you type in GMod Manager](assets/intro-preview.gif)](assets/gmod-manager-intro.mp4)
+
+Watch the [full intro video](assets/gmod-manager-intro.mp4) (about a minute, with sound).
+
 ## Install
 
 1. Download `GModManager-Windows.zip` from the [latest release](https://github.com/ChickenStrxps/gmod-manager/releases/latest).
@@ -12,7 +18,7 @@ You need Steam and Garry's Mod installed. The app updates itself.
 ## Use
 
 - **Play** applies the preset and starts GMod. Missing Workshop mods download after GMod opens; stay on its main menu until **Addons → GMod Manager** shows no mods “not ready.” The Mods tab in this app reports how many Workshop copies GMod has mounted (library copies are separate). If you entered a map while downloads were still finishing, restart the map to load newly available scripts and models.
-- **Mods** – find mods on the Workshop, see their authors and sizes. Discovery saves a mod to the preset immediately. **Check required mods** scans up to 10 uncached Workshop pages per press; successful checks are cached, and any required mods found are saved even if Steam then rate-limits the scan. Press again to continue from where it stopped. If Steam returns HTTP 429, wait before trying again. The app does not run this page-by-page check automatically on startup.
+- **Mods** – find mods on the Workshop, see their authors and sizes. Results update as you type. Discovery saves a mod to the preset immediately. **Check required mods** scans up to 10 uncached Workshop pages per press; successful checks are cached, and any required mods found are saved even if Steam then rate-limits the scan. Press again to continue from where it stopped. If Steam returns HTTP 429, wait before trying again. The app does not run this page-by-page check automatically on startup.
 - **Binds / Settings** – keybinds and console settings that come with the preset.
 - **Import** – paste a public Garry's Mod Steam collection link or ID to create a preset with its mods; use **Details → Update mods from collection** to refresh it. Or choose a shared preset ZIP/JSON.
 - **… → Share as file** – send a preset ZIP to a friend; they open it through **Import**.
@@ -36,3 +42,7 @@ cargo test
 ```
 
 To publish an update, bump `version` in `Cargo.toml`, commit, and run `.\release.ps1`.
+
+## Intro video
+
+`.\promo\render.ps1` films the app and renders the intro for the version in `Cargo.toml`, with that version in the corner. It records a sandboxed copy in `C:\GModManagerDemo` with public Workshop collections, off screen, so none of your presets or files appear and you can keep using the PC. Edit the narration and captions in `promo/script.json`; `-SkipCapture` re-renders without filming again. The voice is a Microsoft neural voice via `edge-tts`; the sounds are CC0 from Kenney (`promo/public/sfx`).

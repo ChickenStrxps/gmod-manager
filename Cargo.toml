@@ -18,6 +18,10 @@ lzma-rs = "0.3"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "gif"] }
 sha2 = "0.10"
 
+[features]
+# Scripted input and an on-screen cursor for recording the product intro (promo/).
+promo = []
+
 [dev-dependencies]
 tempfile = "3"
 

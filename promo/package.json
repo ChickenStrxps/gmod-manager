@@ -1,0 +1,9 @@
+{
+  "name": "gmod-manager-promo",
+  "private": true,
+  "description": "Product intro video. Reuses the Remotion install from ../../AnimeEditSaaS via a node_modules junction (render.ps1 makes it).",
+  "scripts": {
+    "preview": "remotion studio src/index.ts",
+    "render": "remotion render src/index.ts ProductIntro"
+  }
+}

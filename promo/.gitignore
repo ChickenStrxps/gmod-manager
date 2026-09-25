@@ -1,0 +1,7 @@
+node_modules
+out/
+public/capture/
+public/voice/
+public/music.wav
+src/manifest.generated.json
+__pycache__/
