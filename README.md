@@ -12,7 +12,7 @@ You need Steam and Garry's Mod installed. The app updates itself.
 ## Use
 
 - **Play** applies the preset and starts GMod. Missing Workshop mods download after GMod opens; stay on its main menu until **Addons → GMod Manager** shows no mods “not ready.” The Mods tab in this app reports how many Workshop copies GMod has mounted (library copies are separate). If you entered a map while downloads were still finishing, restart the map to load newly available scripts and models.
-- **Mods** – find mods on the Workshop, see their authors and sizes. Discovery saves the mod to the preset immediately, even if Steam rate-limits its separate required-mod check. Missing mods download on Play; use **Check required mods** to retry a failed check.
+- **Mods** – find mods on the Workshop, see their authors and sizes. Discovery saves a mod to the preset immediately. **Check required mods** scans up to 10 uncached Workshop pages per press; successful checks are cached, and any required mods found are saved even if Steam then rate-limits the scan. Press again to continue from where it stopped. If Steam returns HTTP 429, wait before trying again. The app does not run this page-by-page check automatically on startup.
 - **Binds / Settings** – keybinds and console settings that come with the preset.
 - **Import** – paste a public Garry's Mod Steam collection link or ID to create a preset with its mods; use **Details → Update mods from collection** to refresh it. Or choose a shared preset ZIP/JSON.
 - **… → Share as file** – send a preset ZIP to a friend; they open it through **Import**.

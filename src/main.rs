@@ -71,7 +71,7 @@ enum JobEvent {
 
 enum RequirementsEvent {
     Progress(usize, usize),
-    Done(Result<(Vec<String>, HashMap<String, ItemMeta>), String>),
+    Done(Result<(Vec<String>, HashMap<String, ItemMeta>, Option<String>), String>),
 }
 
 struct RequirementsJob {
@@ -218,7 +218,6 @@ struct App {
     authors_rx: Option<Receiver<HashMap<String, String>>>,
     authors_requested: HashSet<String>,
     requirements: Option<RequirementsJob>,
-    requirements_attempted: HashMap<String, Vec<String>>,
     requirements_error: Option<(String, String)>,
     icons: Icons,
 
@@ -285,7 +284,6 @@ impl App {
             authors_rx: None,
             authors_requested: HashSet::new(),
             requirements: None,
-            requirements_attempted: HashMap::new(),
             requirements_error: None,
             dir,
             path_input: state.game_path.clone(),
@@ -923,7 +921,7 @@ impl App {
         }
     }
 
-    fn start_requirements(&mut self, ctx: &egui::Context, manual: bool) {
+    fn start_requirements(&mut self, ctx: &egui::Context) {
         if self.requirements.is_some() || self.job.is_some() {
             return;
         }
@@ -941,13 +939,9 @@ impl App {
             .collect();
         roots.sort();
         roots.dedup();
-        if roots.is_empty()
-            || (!manual && self.requirements_attempted.get(&profile_id) == Some(&roots))
-        {
+        if roots.is_empty() {
             return;
         }
-        self.requirements_attempted
-            .insert(profile_id.clone(), roots.clone());
         self.requirements_error = None;
         let dir = self.dir.clone();
         let (tx, rx) = mpsc::channel();
@@ -996,7 +990,6 @@ impl App {
             return;
         };
         if !self.profiles[index].sync.addons {
-            self.requirements_attempted.remove(&job.profile_id);
             return;
         }
         let mut current: Vec<String> = self.profiles[index]
@@ -1016,7 +1009,7 @@ impl App {
                 self.requirements_error = Some((job.profile_id, error.clone()));
                 self.notify(ctx, Err(error));
             }
-            Ok((ids, meta)) => {
+            Ok((ids, meta, warning)) => {
                 self.meta
                     .extend(meta.iter().map(|(id, item)| (id.clone(), item.clone())));
                 let _ = workshop::save_meta(&self.dir, &self.meta);
@@ -1048,15 +1041,6 @@ impl App {
                         added += 1;
                     }
                 }
-                let mut checked: Vec<String> = profile
-                    .workshop
-                    .items
-                    .iter()
-                    .filter(|item| item.available)
-                    .map(|item| item.id.clone())
-                    .collect();
-                checked.sort();
-                checked.dedup();
                 if added > 0 {
                     if let Err(error) = core::save_profile(&self.dir, &updated) {
                         self.requirements_error = Some((job.profile_id, error.clone()));
@@ -1064,7 +1048,6 @@ impl App {
                         return;
                     }
                 }
-                self.requirements_attempted.insert(job.profile_id, checked);
                 if added > 0 {
                     self.profiles[index] = updated;
                     if self.selected == index {
@@ -1077,6 +1060,12 @@ impl App {
                             if added == 1 { "" } else { "s" }
                         )),
                     );
+                }
+                if let Some(warning) = warning {
+                    self.requirements_error = Some((job.profile_id, warning.clone()));
+                    self.notify(ctx, Err(warning));
+                } else if added == 0 {
+                    self.notify(ctx, Ok("Required mods checked; nothing new needed.".into()));
                 }
             }
         }
@@ -1809,11 +1798,11 @@ impl App {
                         soft_button("Check required mods"),
                     )
                     .on_hover_text(
-                        "Check every mod already in this preset for required Workshop mods",
+                        "Check up to 10 uncached Workshop pages per press. Successful results are saved; press again to continue. Steam may temporarily rate-limit requests.",
                     )
                     .clicked()
                 {
-                    self.start_requirements(ctx, true);
+                    self.start_requirements(ctx);
                 }
             });
         });
@@ -1828,16 +1817,21 @@ impl App {
                     .color(MUTED),
                 );
             }
-        } else if self
+        } else if let Some((_, warning)) = self
             .requirements_error
             .as_ref()
-            .is_some_and(|(id, _)| id == &self.profile().id)
+            .filter(|(id, _)| id == &self.profile().id)
         {
             ui.label(
-                RichText::new("Couldn't check required mods. Mods you added are still saved; use Check required mods to retry.")
-                    .size(12.0)
-                    .color(AMBER),
-            );
+                RichText::new(if warning.contains("429") {
+                    "Steam is rate-limiting checks. Any found mods were saved; wait before trying again."
+                } else {
+                    "Required-mod check paused. Any found mods were saved; press Check required mods to continue."
+                })
+                .size(12.0)
+                .color(AMBER),
+            )
+            .on_hover_text(warning);
         }
         ui.add_space(8.0);
         if self.adding {
@@ -2989,9 +2983,6 @@ impl eframe::App for App {
         self.poll_import_collection(ctx);
         self.poll_update(ctx);
         self.ensure_meta(ctx);
-        if self.view == View::Preset {
-            self.start_requirements(ctx, false);
-        }
         self.ensure_authors(ctx);
         self.autosave(ctx);
         let now = ctx.input(|i| i.time);

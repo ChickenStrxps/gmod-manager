@@ -14,6 +14,7 @@ const DETAILS_URL: &str =
     "https://api.steampowered.com/ISteamRemoteStorage/GetPublishedFileDetails/v1/";
 const MAX_ICON_BYTES: u64 = 8 * 1024 * 1024;
 pub const ICON_SIZE: u32 = 96;
+const MAX_REQUIREMENT_PAGES_PER_CHECK: usize = 10;
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -46,6 +47,14 @@ pub fn agent() -> ureq::Agent {
 /// Steam's item pages reject ureq's TLS fingerprint with 429 even with browser headers.
 /// Windows 10+ ships curl.exe; use that system client for Community HTML.
 pub fn community_page(agent: &ureq::Agent, url: &str) -> Result<String, String> {
+    community_page_with_timeout(agent, url, 20)
+}
+
+fn community_page_with_timeout(
+    agent: &ureq::Agent,
+    url: &str,
+    timeout_seconds: u64,
+) -> Result<String, String> {
     const UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0 Safari/537.36";
     #[cfg(windows)]
     {
@@ -65,7 +74,7 @@ pub fn community_page(agent: &ureq::Agent, url: &str) -> Result<String, String> 
                 "--show-error",
                 "--location",
                 "--max-time",
-                "20",
+                &timeout_seconds.to_string(),
                 "--max-filesize",
                 "4194304",
                 "--user-agent",
@@ -90,6 +99,7 @@ pub fn community_page(agent: &ureq::Agent, url: &str) -> Result<String, String> 
     {
         agent
             .get(url)
+            .timeout(Duration::from_secs(timeout_seconds))
             .set("User-Agent", UA)
             .set("Accept", "text/html,application/xhtml+xml,application/xml")
             .set("Accept-Language", "en-US,en;q=0.9")
@@ -147,23 +157,40 @@ fn save_requirements(dir: &Path, cache: &HashMap<String, Vec<String>>) -> Result
 }
 
 /// Walk every existing mod's requirements, including requirements already present in the preset.
-/// Only successful page checks are cached. A failed check never returns a partial list.
+/// Cache successful pages and return verified discoveries if the request budget or Steam blocks
+/// further checks; the next manual run resumes from cached pages.
 fn collect_requirements(
     roots: &[String],
     cache: &mut HashMap<String, Vec<String>>,
     mut fetch: impl FnMut(&str) -> Result<String, String>,
     mut saved: impl FnMut(&HashMap<String, Vec<String>>) -> Result<(), String>,
     mut progress: impl FnMut(usize, usize),
-) -> Result<Vec<String>, String> {
+) -> Result<(Vec<String>, Option<String>), String> {
     let mut seen: HashSet<String> = roots.iter().cloned().collect();
     let mut queue: VecDeque<String> = roots.iter().cloned().collect();
     let mut added = Vec::new();
     let mut checked = 0;
+    let mut fetched = 0;
+    let mut warning = None;
     while let Some(id) = queue.pop_front() {
         progress(checked, checked + queue.len() + 1);
         if !cache.contains_key(&id) {
-            let html =
-                fetch(&id).map_err(|e| format!("Couldn't check required mods for {id}: {e}"))?;
+            if fetched == MAX_REQUIREMENT_PAGES_PER_CHECK {
+                warning = Some(format!(
+                    "Checked {fetched} new Workshop pages. Some mods remain unchecked; press Check required mods again to continue."
+                ));
+                break;
+            }
+            let html = match fetch(&id) {
+                Ok(html) => html,
+                Err(error) => {
+                    warning = Some(format!(
+                        "Couldn't check required mods for {id}: {error}. Steam may be rate-limiting requests; wait before trying again."
+                    ));
+                    break;
+                }
+            };
+            fetched += 1;
             cache.insert(id.clone(), parse_required_items(&html));
             saved(cache)?;
         }
@@ -178,8 +205,10 @@ fn collect_requirements(
         }
         checked += 1;
     }
-    progress(checked, checked);
-    Ok(added)
+    if warning.is_none() {
+        progress(checked, checked);
+    }
+    Ok((added, warning))
 }
 
 /// Check old and new preset mods alike. Missing mods are returned for the caller to save;
@@ -188,23 +217,24 @@ pub fn preset_requirements(
     dir: &Path,
     roots: &[String],
     progress: impl FnMut(usize, usize),
-) -> Result<(Vec<String>, HashMap<String, ItemMeta>), String> {
+) -> Result<(Vec<String>, HashMap<String, ItemMeta>, Option<String>), String> {
     let agent = agent();
     let mut cache = load_requirements(dir);
-    let missing = collect_requirements(
+    let (missing, warning) = collect_requirements(
         roots,
         &mut cache,
         |id| {
-            community_page(
+            community_page_with_timeout(
                 &agent,
                 &format!("https://steamcommunity.com/sharedfiles/filedetails/?id={id}"),
+                8,
             )
         },
         |cache| save_requirements(dir, cache),
         progress,
     )?;
     let meta = dependency_meta(&missing)?;
-    Ok((missing, meta))
+    Ok((missing, meta, warning))
 }
 
 /// Load details for every requirement; reject missing or non-GMod items rather than silently omit them.
@@ -455,42 +485,11 @@ mod tests {
     }
 
     #[test]
-    fn rate_limited_requirement_scan_keeps_discovery_mod_on_disk() {
-        let temp = tempfile::tempdir().unwrap();
-        let mut profile = crate::model::Profile::blank("Test", "test");
-        let result = crate::core::WorkshopSearchItem {
-            id: "123".into(),
-            meta: ItemMeta {
-                title: "Example mod".into(),
-                available: true,
-                ..Default::default()
-            },
-        };
-        crate::core::add_discovery_mod(temp.path(), &mut profile, &result).unwrap();
-        let mut cache = HashMap::new();
-        let error = collect_requirements(
-            &[result.id.clone()],
-            &mut cache,
-            |_| Err("curl: (22) The requested URL returned error: 429".into()),
-            |_| Ok(()),
-            |_, _| {},
-        )
-        .unwrap_err();
-        assert!(error.contains("429"));
-        let saved: crate::model::Profile =
-            serde_json::from_slice(&fs::read(temp.path().join("presets/test.json")).unwrap())
-                .unwrap();
-        assert_eq!(saved.workshop.items.len(), 1);
-        assert_eq!(saved.workshop.items[0].id, result.id);
-        assert!(saved.workshop.items[0].available);
-    }
-
-    #[test]
     fn old_preset_requirements_include_nested_mods_but_not_existing_ids() {
         let roots = vec!["10".into(), "20".into()];
         let mut cache = HashMap::new();
         let mut fetched = Vec::new();
-        let added = collect_requirements(
+        let (added, warning) = collect_requirements(
             &roots,
             &mut cache,
             |id| {
@@ -505,9 +504,10 @@ mod tests {
             |_| Ok(()),
             |_, _| {},
         ).unwrap();
+        assert!(warning.is_none());
         assert_eq!(added, ["30", "40"]);
         assert_eq!(fetched, ["10", "20", "30", "40"]);
-        let second = collect_requirements(
+        let (second, warning) = collect_requirements(
             &roots,
             &mut cache,
             |_| panic!("cached"),
@@ -515,22 +515,111 @@ mod tests {
             |_, _| {},
         )
         .unwrap();
+        assert!(warning.is_none());
         assert_eq!(second, added);
     }
 
     #[test]
-    fn failed_existing_preset_scan_does_not_cache_failed_page() {
-        let roots = vec!["10".into()];
-        let mut cache = HashMap::new();
-        let error = collect_requirements(
-            &roots, &mut cache,
-            |id| if id == "10" {
-                Ok(r#"<div id="RequiredItems"><a href="https://steamcommunity.com/workshop/filedetails/?id=20"></a></div>"#.into())
-            } else { Err("offline".into()) },
-            |_| Ok(()), |_, _| {},
-        ).unwrap_err();
-        assert!(error.contains("20"));
+    fn rate_limit_keeps_verified_dependencies_and_resumes_without_refetching() {
+        let roots = vec!["10".into(), "30".into()];
+        let temp = tempfile::tempdir().unwrap();
+        let mut cache = load_requirements(temp.path());
+        let mut fetched = Vec::new();
+        let (partial, warning) = collect_requirements(
+            &roots,
+            &mut cache,
+            |id| {
+                fetched.push(id.to_owned());
+                if id == "30" {
+                    Err("curl: (22) The requested URL returned error: 429".into())
+                } else {
+                    Ok(r#"<div id="RequiredItems"><a href="https://steamcommunity.com/workshop/filedetails/?id=20"></a></div><!-- created by -->"#.into())
+                }
+            },
+            |cache| save_requirements(temp.path(), cache),
+            |_, _| {},
+        )
+        .unwrap();
+        assert_eq!(partial, ["20"]);
+        assert!(warning.unwrap().contains("429"));
+        assert_eq!(fetched, ["10", "30"]);
         assert!(cache.contains_key("10"));
-        assert!(!cache.contains_key("20"));
+        assert!(!cache.contains_key("30"));
+        let mut cache = load_requirements(temp.path());
+        let (complete, warning) = collect_requirements(
+            &roots,
+            &mut cache,
+            |id| {
+                fetched.push(id.to_owned());
+                Ok("<div>No required items</div>".into())
+            },
+            |cache| save_requirements(temp.path(), cache),
+            |_, _| {},
+        )
+        .unwrap();
+        assert!(warning.is_none());
+        assert_eq!(complete, ["20"]);
+        assert_eq!(fetched, ["10", "30", "30", "20"]);
+    }
+
+    #[test]
+    fn http_429_pauses_without_marking_page_checked() {
+        use std::{io::Write, net::TcpListener};
+
+        let server = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/workshop", server.local_addr().unwrap());
+        let responder = std::thread::spawn(move || {
+            let (mut client, _) = server.accept().unwrap();
+            client
+                .write_all(b"HTTP/1.1 429 Too Many Requests\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                .unwrap();
+        });
+        let mut cache = HashMap::new();
+        let (added, warning) = collect_requirements(
+            &["2916561591".into()],
+            &mut cache,
+            |_| community_page_with_timeout(&agent(), &url, 8),
+            |_| Ok(()),
+            |_, _| {},
+        )
+        .unwrap();
+        responder.join().unwrap();
+        assert!(added.is_empty());
+        assert!(warning.unwrap().contains("429"));
+        assert!(!cache.contains_key("2916561591"));
+    }
+
+    #[test]
+    fn large_check_pauses_after_ten_uncached_pages_and_resumes() {
+        let roots: Vec<String> = (1..=12).map(|id| id.to_string()).collect();
+        let mut cache = HashMap::new();
+        let mut fetched = Vec::new();
+        let (first, warning) = collect_requirements(
+            &roots,
+            &mut cache,
+            |id| {
+                fetched.push(id.to_owned());
+                Ok("<div>No required items</div>".into())
+            },
+            |_| Ok(()),
+            |_, _| {},
+        )
+        .unwrap();
+        assert!(first.is_empty());
+        assert!(warning.unwrap().contains("continue"));
+        assert_eq!(fetched.len(), 10);
+        let (_, warning) = collect_requirements(
+            &roots,
+            &mut cache,
+            |id| {
+                fetched.push(id.to_owned());
+                Ok("<div>No required items</div>".into())
+            },
+            |_| Ok(()),
+            |_, _| {},
+        )
+        .unwrap();
+        assert!(warning.is_none());
+        assert_eq!(fetched.len(), 12);
     }
 }
