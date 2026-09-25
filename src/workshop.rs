@@ -163,6 +163,87 @@ fn required_items_with(
     Ok(found)
 }
 
+fn requirements_path(dir: &Path) -> PathBuf {
+    dir.join("cache").join("requirements.json")
+}
+
+fn load_requirements(dir: &Path) -> HashMap<String, Vec<String>> {
+    fs::read(requirements_path(dir))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        .unwrap_or_default()
+}
+
+fn save_requirements(dir: &Path, cache: &HashMap<String, Vec<String>>) -> Result<(), String> {
+    let path = requirements_path(dir);
+    fs::create_dir_all(path.parent().unwrap()).map_err(|e| e.to_string())?;
+    let temp = path.with_extension("json.tmp");
+    fs::write(&temp, serde_json::to_vec(cache).map_err(|e| e.to_string())?)
+        .map_err(|e| e.to_string())?;
+    fs::rename(temp, path).map_err(|e| e.to_string())
+}
+
+/// Walk every existing mod's requirements, including requirements already present in the preset.
+/// Only successful page checks are cached. A failed check never returns a partial list.
+fn collect_requirements(
+    roots: &[String],
+    cache: &mut HashMap<String, Vec<String>>,
+    mut fetch: impl FnMut(&str) -> Result<String, String>,
+    mut saved: impl FnMut(&HashMap<String, Vec<String>>) -> Result<(), String>,
+    mut progress: impl FnMut(usize, usize),
+) -> Result<Vec<String>, String> {
+    let mut seen: HashSet<String> = roots.iter().cloned().collect();
+    let mut queue: VecDeque<String> = roots.iter().cloned().collect();
+    let mut added = Vec::new();
+    let mut checked = 0;
+    while let Some(id) = queue.pop_front() {
+        progress(checked, checked + queue.len() + 1);
+        if !cache.contains_key(&id) {
+            let html =
+                fetch(&id).map_err(|e| format!("Couldn't check required mods for {id}: {e}"))?;
+            cache.insert(id.clone(), parse_required_items(&html));
+            saved(cache)?;
+        }
+        for child in &cache[&id] {
+            if seen.insert(child.clone()) {
+                if seen.len() > 500 {
+                    return Err("This preset has too many required mods to check.".into());
+                }
+                queue.push_back(child.clone());
+                added.push(child.clone());
+            }
+        }
+        checked += 1;
+    }
+    progress(checked, checked);
+    Ok(added)
+}
+
+/// Check old and new preset mods alike. Missing mods are returned for the caller to save;
+/// Steam installs them on Play through the existing apply path.
+pub fn preset_requirements(
+    dir: &Path,
+    roots: &[String],
+    progress: impl FnMut(usize, usize),
+) -> Result<(Vec<String>, HashMap<String, ItemMeta>), String> {
+    let agent = agent();
+    let mut cache = load_requirements(dir);
+    let missing = collect_requirements(
+        roots,
+        &mut cache,
+        |id| {
+            community_page(
+                &agent,
+                &format!("https://steamcommunity.com/sharedfiles/filedetails/?id={id}"),
+            )
+        },
+        |cache| save_requirements(dir, cache),
+        progress,
+    )?;
+    let meta = dependency_meta(&missing)?;
+    Ok((missing, meta))
+}
+
 /// Load details for every requirement; reject missing or non-GMod items rather than silently omit them.
 pub fn dependency_meta(ids: &[String]) -> Result<HashMap<String, ItemMeta>, String> {
     let mut found = HashMap::new();
@@ -435,5 +516,54 @@ mod tests {
             }
         }).unwrap_err();
         assert!(error.contains("20") && error.contains("Steam offline"));
+    }
+
+    #[test]
+    fn old_preset_requirements_include_nested_mods_but_not_existing_ids() {
+        let roots = vec!["10".into(), "20".into()];
+        let mut cache = HashMap::new();
+        let mut fetched = Vec::new();
+        let added = collect_requirements(
+            &roots,
+            &mut cache,
+            |id| {
+                fetched.push(id.to_owned());
+                Ok(match id {
+                    "10" => r#"<div id="RequiredItems"><a href="https://steamcommunity.com/workshop/filedetails/?id=20"></a><a href="https://steamcommunity.com/workshop/filedetails/?id=30"></a></div><!-- created by -->"#,
+                    "20" => r#"<div id="RequiredItems"><a href="https://steamcommunity.com/workshop/filedetails/?id=30"></a></div><!-- created by -->"#,
+                    "30" => r#"<div id="RequiredItems"><a href="https://steamcommunity.com/workshop/filedetails/?id=40"></a></div><!-- created by -->"#,
+                    _ => "<div>No required items</div>",
+                }.into())
+            },
+            |_| Ok(()),
+            |_, _| {},
+        ).unwrap();
+        assert_eq!(added, ["30", "40"]);
+        assert_eq!(fetched, ["10", "20", "30", "40"]);
+        let second = collect_requirements(
+            &roots,
+            &mut cache,
+            |_| panic!("cached"),
+            |_| Ok(()),
+            |_, _| {},
+        )
+        .unwrap();
+        assert_eq!(second, added);
+    }
+
+    #[test]
+    fn failed_existing_preset_scan_does_not_cache_failed_page() {
+        let roots = vec!["10".into()];
+        let mut cache = HashMap::new();
+        let error = collect_requirements(
+            &roots, &mut cache,
+            |id| if id == "10" {
+                Ok(r#"<div id="RequiredItems"><a href="https://steamcommunity.com/workshop/filedetails/?id=20"></a></div>"#.into())
+            } else { Err("offline".into()) },
+            |_| Ok(()), |_, _| {},
+        ).unwrap_err();
+        assert!(error.contains("20"));
+        assert!(cache.contains_key("10"));
+        assert!(!cache.contains_key("20"));
     }
 }

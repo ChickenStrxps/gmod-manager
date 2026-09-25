@@ -69,6 +69,19 @@ enum JobEvent {
     Done(Result<String, String>),
 }
 
+enum RequirementsEvent {
+    Progress(usize, usize),
+    Done(Result<(Vec<String>, HashMap<String, ItemMeta>), String>),
+}
+
+struct RequirementsJob {
+    profile_id: String,
+    roots: Vec<String>,
+    checked: usize,
+    total: usize,
+    rx: Receiver<RequirementsEvent>,
+}
+
 struct Job {
     kind: JobKind,
     label: String,
@@ -217,6 +230,9 @@ struct App {
             >,
         >,
     >,
+    requirements: Option<RequirementsJob>,
+    requirements_attempted: HashMap<String, Vec<String>>,
+    requirements_error: Option<(String, String)>,
     icons: Icons,
 
     steam: HashMap<String, SteamCopy>,
@@ -279,6 +295,9 @@ impl App {
             authors_rx: None,
             authors_requested: HashSet::new(),
             add_rx: None,
+            requirements: None,
+            requirements_attempted: HashMap::new(),
+            requirements_error: None,
             dir,
             path_input: state.game_path.clone(),
             state,
@@ -342,7 +361,7 @@ impl App {
     }
 
     fn busy(&self) -> bool {
-        self.job.is_some() || self.add_rx.is_some()
+        self.job.is_some() || self.add_rx.is_some() || self.requirements.is_some()
     }
 
     fn notify(&mut self, ctx: &egui::Context, result: Result<String, String>) {
@@ -527,7 +546,7 @@ impl App {
     }
 
     fn ensure_authors(&mut self, ctx: &egui::Context) {
-        if self.authors_rx.is_some() {
+        if self.authors_rx.is_some() || self.requirements.is_some() {
             return;
         }
         let ids: Vec<String> = self
@@ -912,8 +931,161 @@ impl App {
         }
     }
 
+    fn start_requirements(&mut self, ctx: &egui::Context, manual: bool) {
+        if self.requirements.is_some() || self.add_rx.is_some() || self.job.is_some() {
+            return;
+        }
+        let profile = self.profile();
+        if !profile.sync.addons {
+            return;
+        }
+        let profile_id = profile.id.clone();
+        let mut roots: Vec<String> = profile
+            .workshop
+            .items
+            .iter()
+            .filter(|item| item.available)
+            .map(|item| item.id.clone())
+            .collect();
+        roots.sort();
+        roots.dedup();
+        if roots.is_empty()
+            || (!manual && self.requirements_attempted.get(&profile_id) == Some(&roots))
+        {
+            return;
+        }
+        self.requirements_attempted
+            .insert(profile_id.clone(), roots.clone());
+        self.requirements_error = None;
+        let dir = self.dir.clone();
+        let (tx, rx) = mpsc::channel();
+        let repaint = ctx.clone();
+        let scan_roots = roots.clone();
+        std::thread::spawn(move || {
+            let result = workshop::preset_requirements(&dir, &scan_roots, |done, total| {
+                let _ = tx.send(RequirementsEvent::Progress(done, total));
+            });
+            let _ = tx.send(RequirementsEvent::Done(result));
+            repaint.request_repaint();
+        });
+        self.requirements = Some(RequirementsJob {
+            profile_id,
+            roots,
+            checked: 0,
+            total: 0,
+            rx,
+        });
+    }
+
+    fn poll_requirements(&mut self, ctx: &egui::Context) {
+        let Some(job) = self.requirements.as_mut() else {
+            return;
+        };
+        let mut finished = None;
+        loop {
+            match job.rx.try_recv() {
+                Ok(RequirementsEvent::Progress(checked, total)) => {
+                    job.checked = checked;
+                    job.total = total;
+                }
+                Ok(RequirementsEvent::Done(result)) => finished = Some(result),
+                Err(mpsc::TryRecvError::Empty) => break,
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    if finished.is_none() {
+                        finished = Some(Err("Requirement check stopped unexpectedly.".into()));
+                    }
+                    break;
+                }
+            }
+        }
+        let Some(result) = finished else { return };
+        let job = self.requirements.take().unwrap();
+        match result {
+            Err(error) => {
+                self.requirements_error = Some((job.profile_id, error.clone()));
+                self.notify(ctx, Err(error));
+            }
+            Ok((ids, meta)) => {
+                let Some(index) = self.profiles.iter().position(|p| p.id == job.profile_id) else {
+                    return;
+                };
+                if !self.profiles[index].sync.addons {
+                    self.requirements_attempted.remove(&job.profile_id);
+                    return;
+                }
+                let mut current: Vec<String> = self.profiles[index]
+                    .workshop
+                    .items
+                    .iter()
+                    .filter(|item| item.available)
+                    .map(|item| item.id.clone())
+                    .collect();
+                current.sort();
+                current.dedup();
+                if current != job.roots {
+                    return; // Preset changed while checking; the next frame scans the new set.
+                }
+                self.meta
+                    .extend(meta.iter().map(|(id, item)| (id.clone(), item.clone())));
+                let _ = workshop::save_meta(&self.dir, &self.meta);
+                let profile = &mut self.profiles[index];
+                let mut present: HashSet<String> = profile
+                    .workshop
+                    .items
+                    .iter()
+                    .map(|item| item.id.clone())
+                    .collect();
+                let mut added = 0;
+                for id in ids {
+                    if present.insert(id.clone()) {
+                        profile.workshop.items.push(WorkshopItem {
+                            title: meta.get(&id).map(|item| item.title.clone()),
+                            id,
+                            available: true,
+                            manually_added: true,
+                        });
+                        added += 1;
+                    } else if let Some(item) = profile
+                        .workshop
+                        .items
+                        .iter_mut()
+                        .find(|item| item.id == id && !item.available)
+                    {
+                        item.available = true; // Steam confirmed this previously unavailable requirement is live.
+                        added += 1;
+                    }
+                }
+                let saved = (added > 0).then(|| core::save_profile(&self.dir, profile));
+                let mut checked: Vec<String> = profile
+                    .workshop
+                    .items
+                    .iter()
+                    .filter(|item| item.available)
+                    .map(|item| item.id.clone())
+                    .collect();
+                checked.sort();
+                checked.dedup();
+                self.requirements_attempted.insert(job.profile_id, checked);
+                if let Some(saved) = saved {
+                    if self.selected == index {
+                        self.review = None;
+                    }
+                    self.notify(
+                        ctx,
+                        saved.map(|_| {
+                            format!(
+                                "Added {added} required mod{} to this preset.",
+                                if added == 1 { "" } else { "s" }
+                            )
+                        }),
+                    );
+                }
+            }
+        }
+    }
+
     fn start_add(&mut self, ctx: &egui::Context, result: core::WorkshopSearchItem) {
-        if self.add_rx.is_some() {
+        if self.add_rx.is_some() || self.requirements.is_some() {
             return;
         }
         let profile_id = self.profile().id.clone();
@@ -1619,8 +1791,42 @@ impl App {
                 if ui.add(soft_button(label)).clicked() {
                     self.adding = !self.adding;
                 }
+                if ui
+                    .add_enabled(
+                        !self.busy() && self.profile().sync.addons,
+                        soft_button("Check required mods"),
+                    )
+                    .on_hover_text(
+                        "Check every mod already in this preset for required Workshop mods",
+                    )
+                    .clicked()
+                {
+                    self.start_requirements(ctx, true);
+                }
             });
         });
+        if let Some(job) = &self.requirements {
+            if job.profile_id == self.profile().id {
+                ui.label(
+                    RichText::new(format!(
+                        "Checking required mods… {} / {}",
+                        job.checked, job.total
+                    ))
+                    .size(12.0)
+                    .color(MUTED),
+                );
+            }
+        } else if self
+            .requirements_error
+            .as_ref()
+            .is_some_and(|(id, _)| id == &self.profile().id)
+        {
+            ui.label(
+                RichText::new("Couldn't check required mods. Use Check required mods to retry.")
+                    .size(12.0)
+                    .color(AMBER),
+            );
+        }
         ui.add_space(8.0);
         if self.adding {
             self.add_panel(ui, ctx);
@@ -1878,7 +2084,7 @@ impl App {
                                 button,
                                 egui::Button::new(if added { "Added" } else { "Add" })
                                     .selected(added),
-                                self.add_rx.is_none() && !added,
+                                self.add_rx.is_none() && self.requirements.is_none() && !added,
                             )
                             .clicked()
                             {
@@ -2682,11 +2888,15 @@ impl eframe::App for App {
         self.poll_meta();
         self.poll_authors();
         self.poll_search(ctx);
+        self.poll_requirements(ctx);
         self.poll_add(ctx);
         self.poll_refresh(ctx);
         self.poll_job(ctx);
         self.poll_update(ctx);
         self.ensure_meta(ctx);
+        if self.view == View::Preset {
+            self.start_requirements(ctx, false);
+        }
         self.ensure_authors(ctx);
         self.autosave(ctx);
         let now = ctx.input(|i| i.time);
@@ -2699,6 +2909,7 @@ impl eframe::App for App {
             || self.search_rx.is_some()
             || self.refresh_rx.is_some()
             || self.add_rx.is_some()
+            || self.requirements.is_some()
         {
             ctx.request_repaint_after(Duration::from_millis(100));
         }
