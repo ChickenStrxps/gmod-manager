@@ -27,7 +27,7 @@ You need Steam and Garry's Mod installed. The app updates itself.
 
 ## Library
 
-Turn it on in **Library**. It keeps a compressed copy of every mod, so switching presets doesn't mean downloading everything again. Mods you aren't using get removed from Steam, and they come back from the library when you need them. New copies under 64 MB use stronger compression; saving them can take longer. **Optimize stored mods** can shrink older library copies without downloading them again and only replaces an archive if the result is smaller. Larger mods keep the faster compression mode to limit memory and CPU use.
+Turn it on in **Library**. It keeps a compressed copy of every mod, so switching presets doesn't mean downloading everything again. Mods you aren't using get removed from Steam, and they come back from the library when you need them. New copies under 64 MB use stronger compression; saving them can take longer. **Optimize stored mods** can shrink older library copies without downloading them again and only replaces an archive if the result is smaller. Larger mods keep the faster compression mode to limit memory and CPU use. Compression is lossless: restored mod files are unchanged. Savings vary, especially for mods made mostly of already-compressed media; the app reports the space saved when optimization finishes.
 
 In GMod, these mods show up under **Addons → GMod Manager** instead of **Subscribed**.
 

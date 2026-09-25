@@ -14,7 +14,7 @@ use std::{
 };
 
 const ZSTD_LEVEL: i32 = 7;
-const SMALL_ZSTD_LEVEL: i32 = 19;
+const SMALL_ZSTD_LEVEL: i32 = 18;
 const SMALL_GMA_MAX_BYTES: u64 = 64 * 1024 * 1024;
 const MARKER: &str = "gmm.json";
 
@@ -921,7 +921,7 @@ mod tests {
     fn optimizes_old_library_copy_without_losing_addon_files() {
         let temp = tempfile::tempdir().unwrap();
         let game = temp.path().join("garrysmod");
-        let mut library = Library::open(&temp.path().join("library")).unwrap();
+        let library = Library::open(&temp.path().join("library")).unwrap();
         let mut seed = vec![0; 3 * 1024 * 1024];
         let mut state = 1u64;
         for chunk in seed.chunks_mut(8) {

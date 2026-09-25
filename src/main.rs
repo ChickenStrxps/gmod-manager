@@ -938,13 +938,19 @@ impl App {
                 .filter(|(_, entry)| library::can_optimize(entry))
                 .map(|(id, _)| id.clone())
                 .collect();
-            let mut saved = 0;
+            let total_raw: u64 = ids.iter().map(|id| library.entries[id].raw_size).sum();
+            let mut saved = 0u64;
+            let mut processed = 0u64;
             for (index, id) in ids.iter().enumerate() {
-                let raw_size = library.entries[id].raw_size.max(1);
+                let raw_size = library.entries[id].raw_size;
                 let label = format!("Optimizing mod {}/{}", index + 1, ids.len());
                 saved += library.optimize(id, &mut |done| {
-                    progress(&label, done as f32 / raw_size as f32)
+                    progress(
+                        &label,
+                        (processed + done.min(raw_size)) as f32 / total_raw as f32,
+                    )
                 })?;
+                processed += raw_size;
             }
             Ok(format!(
                 "Library optimization saved {}.",
