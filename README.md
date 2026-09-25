@@ -26,6 +26,8 @@ In GMod, these mods show up under **Addons → GMod Manager** instead of **Subsc
 
 In the spawn menu, **Entities** only shows entity addons. Look under **Weapons** for weapons and **Browse → Addons** for models and spawnlists; an addon does not necessarily add anything to Entities.
 
+When addon syncing is on, **Play** also installs a small client-side spawn-menu fallback. Existing weapon and entity icons stay unchanged. If an addon supplies no icon under its class name, GMod Manager tries a related icon, then its model, then a standard category symbol; this does not repair missing game models or textures. Re-apply and restart GMod after updating the manager to load this change.
+
 ## Building
 
 ```powershell
