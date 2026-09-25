@@ -1,0 +1,499 @@
+{
+  "schemaVersion": 1,
+  "id": "lowgan-portal-movement-3",
+  "name": "Lowgan's Portal Movement 3",
+  "description": "Lowgan's Portal Movement 3 collection. The creator's only published bind is Seamless Portals' portal gun (use portal_gun). His edited addons on Google Drive are optional.",
+  "source": {
+    "videoUrl": "https://www.youtube.com/watch?v=JGETrLfZJrY",
+    "collectionUrl": "https://steamcommunity.com/sharedfiles/filedetails/?id=3428047388",
+    "capturedOn": "2026-09-24"
+  },
+  "workshop": {
+    "collectionId": "3428047388",
+    "items": [
+      {
+        "id": "2824459346",
+        "title": "Bullet Time Recreated | F.E.A.R.-Inspired Slow Motion",
+        "available": true
+      },
+      {
+        "id": "579943369",
+        "title": "Catalyst Blockout (Alpha Parkour Map)",
+        "available": true
+      },
+      {
+        "id": "2183841502",
+        "title": "Combat Ninja Sword",
+        "available": true
+      },
+      {
+        "id": "2925774481",
+        "title": "FPS Saving Fog",
+        "available": true
+      },
+      {
+        "id": "2586172689",
+        "title": "gm_bigcity but it's flooded",
+        "available": true
+      },
+      {
+        "id": "2739975163",
+        "title": "gm_oua",
+        "available": true
+      },
+      {
+        "id": "2815017516",
+        "title": "Mirror 17",
+        "available": true
+      },
+      {
+        "id": "3361918952",
+        "title": "Neo (The Matrix: Path of Neo) Player Model/NPC Pack",
+        "available": true
+      },
+      {
+        "id": "3077166853",
+        "title": "Projectile Flight",
+        "available": true
+      },
+      {
+        "id": "2936991877",
+        "title": "Quick Loadouts",
+        "available": true
+      },
+      {
+        "id": "2773737445",
+        "title": "Seamless Portals",
+        "available": true
+      },
+      {
+        "id": "104793138",
+        "title": "Supersizeroom V2",
+        "available": true
+      },
+      {
+        "id": "2967208438",
+        "title": "ULTRAKILL ARMS",
+        "available": true
+      },
+      {
+        "id": "3013275618",
+        "title": "ULTRAKILL Coin Mechanics",
+        "available": true
+      },
+      {
+        "id": "2835397953",
+        "title": "ULTRAKILL Dash & Ground Slam Ability",
+        "available": true
+      },
+      {
+        "id": "3268767515",
+        "title": "ULTRAKILL BETA WEAPON PACK UPDATE",
+        "available": true
+      },
+      {
+        "id": "3080114310",
+        "title": "VManip (Base) Remix 2024",
+        "available": true
+      },
+      {
+        "id": "2813902415",
+        "title": "[ArcCW] Apex Legends SWEPs",
+        "available": true
+      },
+      {
+        "id": "2131057232",
+        "title": "[ArcCW] Arctic's Customizable Weapons (Base)",
+        "available": true
+      },
+      {
+        "id": "2790002344",
+        "title": "[ArcCW] Ballistic Knife (Call of Duty: Black Ops Cold War)",
+        "available": true
+      },
+      {
+        "id": "3345837468",
+        "title": "[Rocket + Gravity Update] Jumpers",
+        "available": true
+      },
+      {
+        "id": "1428613972",
+        "title": "Leon S. Kennedy (HD) - Resident Evil 4 - [Ragdoll/NPC/PM]",
+        "available": true
+      },
+      {
+        "id": "1705992410",
+        "title": "H0L-D4: Holographic Heads Up Display",
+        "available": true
+      },
+      {
+        "id": "296385367",
+        "title": "Hitmarkers for Gmod!",
+        "available": true
+      },
+      {
+        "id": "1693883096",
+        "title": "Kill Feed Disabler",
+        "available": true
+      },
+      {
+        "id": "3108501548",
+        "title": null,
+        "available": false
+      },
+      {
+        "id": "2922701940",
+        "title": "br_utalism",
+        "available": true
+      },
+      {
+        "id": "1688393199",
+        "title": "Apex Legends - Pathfinder [PM/Ragdoll]",
+        "available": true
+      },
+      {
+        "id": "3272569858",
+        "title": "Advanced Cloak REUPLOAD",
+        "available": true
+      },
+      {
+        "id": "2847795532",
+        "title": "Ivory",
+        "available": true
+      },
+      {
+        "id": "2947386098",
+        "title": "NPC No Weapon Drop",
+        "available": true
+      },
+      {
+        "id": "3334912444",
+        "title": "Paranatural",
+        "available": true
+      },
+      {
+        "id": "2638762619",
+        "title": null,
+        "available": false
+      },
+      {
+        "id": "265405555",
+        "title": "gmodparkourmap (gm_edgeparkour)",
+        "available": true
+      },
+      {
+        "id": "3419518126",
+        "title": "gm_bigcity_greenhill",
+        "available": true
+      },
+      {
+        "id": "2414286979",
+        "title": "TTT Teen Room",
+        "available": true
+      },
+      {
+        "id": "317984604",
+        "title": "ttt_Concept",
+        "available": true
+      },
+      {
+        "id": "2876266251",
+        "title": "Edge runner [Beatrun]",
+        "available": true
+      },
+      {
+        "id": "2846632877",
+        "title": "Diorama Gallery",
+        "available": true
+      },
+      {
+        "id": "3280094213",
+        "title": "High Rise - Parkour map",
+        "available": true
+      },
+      {
+        "id": "3308052821",
+        "title": "Lily's Bedroom",
+        "available": true
+      },
+      {
+        "id": "3308489120",
+        "title": "br_skytown",
+        "available": true
+      },
+      {
+        "id": "2663994021",
+        "title": "Easy Rocket Jumps",
+        "available": true
+      },
+      {
+        "id": "3434222803",
+        "title": null,
+        "available": false
+      },
+      {
+        "id": "931448005",
+        "title": "Grappling Hook",
+        "available": true
+      },
+      {
+        "id": "3478612653",
+        "title": "Mirror's Edge - Training Ground",
+        "available": true
+      },
+      {
+        "id": "3509020992",
+        "title": "Mirror's edge - Icarus",
+        "available": true
+      },
+      {
+        "id": "3552385944",
+        "title": "Seamless Portals - Portal Gun",
+        "available": true
+      },
+      {
+        "id": "3544273655",
+        "title": "Simple Grenade Cooking",
+        "available": true
+      },
+      {
+        "id": "2287816257",
+        "title": "Sliding Ability",
+        "available": true
+      },
+      {
+        "id": "3537847150",
+        "title": "Smooth Tracking Camera",
+        "available": true
+      },
+      {
+        "id": "104540875",
+        "title": "Trampoline",
+        "available": true
+      },
+      {
+        "id": "3481082543",
+        "title": "VManip Grappling Hook: The Finals",
+        "available": true
+      },
+      {
+        "id": "698196774",
+        "title": "Wall Kick Parkour",
+        "available": true
+      },
+      {
+        "id": "3262499127",
+        "title": "Chen's VManip Patch (Woke™ Edition)",
+        "available": true
+      },
+      {
+        "id": "3005285079",
+        "title": "Double Action: Boogaloo Map Pack",
+        "available": true
+      },
+      {
+        "id": "2991110561",
+        "title": "Grenade Detonation - Shootable HL2 Grenades",
+        "available": true
+      },
+      {
+        "id": "367031963",
+        "title": "Hurt what you land on when falling",
+        "available": true
+      },
+      {
+        "id": "3352146553",
+        "title": "Manual Weapon Pickup 🔫",
+        "available": true
+      },
+      {
+        "id": "1987521428",
+        "title": "mighty foot engaged",
+        "available": true
+      },
+      {
+        "id": "3074465725",
+        "title": "Negated Damage Knockback",
+        "available": true
+      },
+      {
+        "id": "3480509714",
+        "title": "Npc Fall Damage",
+        "available": true
+      },
+      {
+        "id": "3550458664",
+        "title": "Outline Shader",
+        "available": true
+      },
+      {
+        "id": "3357738669",
+        "title": "Player Collision Stabilizer",
+        "available": true
+      },
+      {
+        "id": "3305629964",
+        "title": "Terminal",
+        "available": true
+      },
+      {
+        "id": "3413177769",
+        "title": "[VManip] Dishonored abilities",
+        "available": true
+      },
+      {
+        "id": "3028479330",
+        "title": "br_forget\n",
+        "available": true
+      },
+      {
+        "id": "2844665708",
+        "title": "br_devcity",
+        "available": true
+      },
+      {
+        "id": "3266945584",
+        "title": "Camcoder - Record your actions",
+        "available": true
+      },
+      {
+        "id": "3416292726",
+        "title": "Call of Duty : Modern Warfare II - Ghost Urban/Infil [PM]",
+        "available": true
+      },
+      {
+        "id": "3585303916",
+        "title": "CoD4 mp_pipeline [MAP]",
+        "available": true
+      },
+      {
+        "id": "420970650",
+        "title": "Darken217's SciFi Weapons",
+        "available": true
+      },
+      {
+        "id": "3560941132",
+        "title": "De_Nuke Parkour [BEATRUN]",
+        "available": true
+      },
+      {
+        "id": "1847505933",
+        "title": "Draconic Base",
+        "available": true
+      },
+      {
+        "id": "3551915719",
+        "title": "Gm_Generic_city",
+        "available": true
+      },
+      {
+        "id": "3203239448",
+        "title": "gm_oua_tx",
+        "available": true
+      },
+      {
+        "id": "3261209834",
+        "title": "GM_OUA Night",
+        "available": true
+      },
+      {
+        "id": "3596881286",
+        "title": "Realistic Grapple Hook",
+        "available": true
+      },
+      {
+        "id": "3591904868",
+        "title": "Snaptic's Cursor",
+        "available": true
+      },
+      {
+        "id": "2265694230",
+        "title": "The Rat's Kitchen - Remastered",
+        "available": true
+      },
+      {
+        "id": "2157021399",
+        "title": "[VManip] Quick Grenades (HL2)",
+        "available": true
+      },
+      {
+        "id": "3434255773",
+        "title": "| straftat | Gm_High_Walls_0",
+        "available": true
+      },
+      {
+        "id": "3163566574",
+        "title": "Portal Gun [UPDATE]",
+        "available": true
+      },
+      {
+        "id": "212889081",
+        "title": "Weaponized Portal Device / Gun",
+        "available": true
+      },
+      {
+        "id": "2161253270",
+        "title": "[ArcCW] Halo CE+ Weaponry",
+        "available": true
+      },
+      {
+        "id": "2995437323",
+        "title": "[ArcCW] Cheat Attachments",
+        "available": true
+      },
+      {
+        "id": "2159027144",
+        "title": "[ArcCW] Charms: Vanilla",
+        "available": true
+      },
+      {
+        "id": "2135529088",
+        "title": "[ArcCW] Modern Warfare 2",
+        "available": true
+      },
+      {
+        "id": "3325270406",
+        "title": "[ArcCW]One Handed Hold Type (charm slot)",
+        "available": true
+      },
+      {
+        "id": "3113062562",
+        "title": "[Beatrun] Slidedown",
+        "available": true
+      },
+      {
+        "id": "2797592872",
+        "title": "Titanfall 2 Pilot Playermodels",
+        "available": true
+      },
+      {
+        "id": "2840031720",
+        "title": "TFA Base",
+        "available": true
+      },
+      {
+        "id": "2908673216",
+        "title": "[TFA][AT] CoD Black Ops II SWEPs",
+        "available": true
+      }
+    ]
+  },
+  "optionalCustomFiles": {
+    "sourceUrl": "https://drive.google.com/drive/folders/1lUB93u6_lvblchJLRV2HzM3Cm0fVFaaH",
+    "installMode": "manual-import"
+  },
+  "binds": [
+    {
+      "key": "h",
+      "command": "use portal_gun",
+      "sync": true
+    }
+  ],
+  "convars": [],
+  "fileMappings": [],
+  "sync": {
+    "addons": true,
+    "binds": true,
+    "settings": false
+  }
+}

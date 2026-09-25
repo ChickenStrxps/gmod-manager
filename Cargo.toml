@@ -1,0 +1,27 @@
+[package]
+name = "gmod-manager"
+version = "0.6.0"
+edition = "2024"
+
+[dependencies]
+eframe = { version = "0.33.3", default-features = false, features = ["glow", "default_fonts"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rfd = "0.15"
+sysinfo = "0.35"
+winreg = "0.55"
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
+ureq = "2.12"
+zip = { version = "2.4.2", default-features = false }
+zstd = { version = "0.13", default-features = false, features = ["zstdmt"] }
+lzma-rs = "0.3"
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "gif"] }
+sha2 = "0.10"
+
+[dev-dependencies]
+tempfile = "3"
+
+[profile.release]
+lto = "thin"
+strip = true
+codegen-units = 1
