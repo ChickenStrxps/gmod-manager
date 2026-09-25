@@ -105,6 +105,7 @@ type IconResult = (String, Option<([usize; 2], Vec<u8>)>);
 struct Icons {
     dir: PathBuf,
     textures: HashMap<String, Option<egui::TextureHandle>>,
+    loaded_at: HashMap<String, f64>,
     queue: Option<Sender<(String, String)>>,
     results: Receiver<IconResult>,
     results_tx: Sender<IconResult>,
@@ -116,6 +117,7 @@ impl Icons {
         Self {
             dir,
             textures: HashMap::new(),
+            loaded_at: HashMap::new(),
             queue: None,
             results,
             results_tx,
@@ -160,7 +162,11 @@ impl Icons {
     }
 
     fn poll(&mut self, ctx: &egui::Context) {
+        let now = ctx.input(|i| i.time);
         while let Ok((id, image)) = self.results.try_recv() {
+            if image.is_some() {
+                self.loaded_at.insert(id.clone(), now);
+            }
             let texture = image.map(|(size, rgba)| {
                 ctx.load_texture(
                     format!("icon-{id}"),
@@ -190,6 +196,71 @@ impl ModState {
             Self::Unpacked => ("Installed from library", GREEN),
             Self::Library => ("In library", ACCENT),
             Self::Missing => ("Downloads on launch", FAINT),
+        }
+    }
+}
+
+/// The Ctrl+K quick switcher.
+struct Palette {
+    query: String,
+    selected: usize,
+    opened_at: f64,
+}
+
+#[derive(Clone, Copy)]
+enum Command {
+    Preset(usize),
+    Tab(Tab),
+    Library,
+    Settings,
+    Play,
+    ApplyOnly,
+    Review,
+    Undo,
+    Share,
+    Duplicate,
+    NewPreset,
+    Import,
+    AddMods,
+    OpenCollection,
+    ToggleGrid,
+}
+
+/// Scores how well `query` matches `text`: whole-substring matches rank above scattered
+/// letters, and earlier matches rank higher. `None` means no match.
+fn match_score(query: &str, text: &str) -> Option<i32> {
+    let query = query.trim().to_lowercase();
+    if query.is_empty() {
+        return Some(0);
+    }
+    let text = text.to_lowercase();
+    if let Some(at) = text.find(&query) {
+        let word_start = at == 0 || !text.as_bytes()[at - 1].is_ascii_alphanumeric();
+        return Some(1000 - at as i32 + if word_start { 200 } else { 0 });
+    }
+    let mut chars = text.chars().enumerate();
+    let mut last = 0;
+    for wanted in query.chars().filter(|c| !c.is_whitespace()) {
+        last = chars.find(|(_, c)| *c == wanted)?.0;
+    }
+    Some(500 - last as i32)
+}
+
+/// Mod states grouped for the status bar and filter chips.
+const STATUS_GROUPS: [(&str, Color32); 4] = [
+    ("Installed", GREEN),
+    ("In library", ACCENT),
+    ("To download", FAINT),
+    ("Removed", RED),
+];
+
+impl ModState {
+    fn group(self) -> usize {
+        match self {
+            Self::Steam | Self::Unpacked => 0,
+            Self::Library => 1,
+            Self::Missing => 2,
+            Self::Unavailable => 3,
         }
     }
 }
@@ -242,9 +313,6 @@ struct App {
     query_edited_at: Option<f64>,
     /// When the current first page of results arrived, for their entrance animation.
     results_at: f64,
-    /// What the main panel shows; a change restarts `content_at`, the fade-in start.
-    content_key: (View, usize, Tab),
-    content_at: f64,
     refresh_rx: Option<
         Receiver<Result<(String, Profile, usize, usize, HashMap<String, ItemMeta>), String>>,
     >,
@@ -260,6 +328,14 @@ struct App {
     update_manual: bool,
     #[cfg(feature = "promo")]
     promo: promo::Promo,
+
+    status_filter: Option<usize>,
+    palette: Option<Palette>,
+
+    shown_view: (View, usize),
+    view_changed_at: f64,
+    shown_tab: Tab,
+    tab_changed_at: f64,
 }
 
 impl App {
@@ -324,8 +400,6 @@ impl App {
             search_rx: None,
             query_edited_at: None,
             results_at: 0.0,
-            content_key: (View::Preset, selected, Tab::Mods),
-            content_at: 0.0,
             refresh_rx: None,
             collection_rx: None,
             job: None,
@@ -338,6 +412,12 @@ impl App {
             update_manual: false,
             #[cfg(feature = "promo")]
             promo: promo::Promo::start(),
+            status_filter: None,
+            palette: None,
+            shown_view: (View::Preset, selected),
+            view_changed_at: f64::NEG_INFINITY,
+            shown_tab: Tab::Mods,
+            tab_changed_at: f64::NEG_INFINITY,
         };
         app.rescan();
         update::cleanup();
@@ -434,6 +514,7 @@ impl App {
         self.results_query.clear();
         self.query_edited_at = None;
         self.filter.clear();
+        self.status_filter = None;
         self.save_error = None;
         self.remember();
     }
@@ -482,6 +563,15 @@ impl App {
     }
 
     /// Total Workshop size of a preset's available mods, and whether every size is known.
+    /// How many of the preset's mods fall into each of `STATUS_GROUPS`.
+    fn status_counts(&self) -> [usize; 4] {
+        let mut counts = [0; 4];
+        for item in &self.profile().workshop.items {
+            counts[self.mod_state(item).group()] += 1;
+        }
+        counts
+    }
+
     fn preset_size(&self, profile: &Profile) -> (u64, bool) {
         let mut total = 0;
         let mut complete = true;
@@ -606,6 +696,8 @@ impl App {
         if self.job.is_some() {
             return;
         }
+        // Start the progress bar from empty rather than gliding back from the last job.
+        ctx.data_mut(|d| d.remove::<(f32, f32, f64)>(Id::new("job-progress")));
         let (tx, rx) = mpsc::channel();
         let repaint = ctx.clone();
         std::thread::spawn(move || {
@@ -1438,7 +1530,11 @@ impl App {
                     ui.add_space(6.0);
                     ui.label(semibold("GMod Manager", 15.0));
                 });
-                ui.add_space(18.0);
+                ui.add_space(12.0);
+                if search_pill(ui).clicked() {
+                    self.open_palette(ctx);
+                }
+                ui.add_space(14.0);
                 ui.horizontal(|ui| {
                     ui.add_space(6.0);
                     ui.label(RichText::new("Presets").size(12.0).color(FAINT));
@@ -1550,18 +1646,21 @@ impl App {
         let (rect, response) =
             ui.allocate_exact_size(vec2(ui.available_width(), 50.0), Sense::click());
         let painter = ui.painter_at(rect);
-        let shown = ease_bool(ui, response.id.with("active"), active);
-        let hover = ease_bool(ui, response.id.with("hover"), response.hovered());
-        let fill = shown.max(hover * 0.6);
-        if fill > 0.0 {
-            painter.rect_filled(rect, 7.0, ROW.gamma_multiply(fill));
+        let hover =
+            ui.ctx()
+                .animate_bool_with_time(response.id.with("hover"), response.hovered(), 0.12);
+        let selected = ui
+            .ctx()
+            .animate_bool_with_time(response.id.with("active"), active, 0.2);
+        if hover > 0.0 && selected < 1.0 {
+            painter.rect_filled(rect, 7.0, ROW.gamma_multiply(0.6 * hover));
         }
-        if shown > 0.0 {
+        if selected > 0.0 {
+            painter.rect_filled(rect, 7.0, ROW.gamma_multiply(selected));
+            // The accent bar grows out from the middle when a preset is picked.
+            let bar = (rect.height() - 24.0) * ease_out(selected);
             painter.rect_filled(
-                Rect::from_center_size(
-                    pos2(rect.left() + 1.5, rect.center().y),
-                    vec2(3.0, (rect.height() - 24.0) * shown),
-                ),
+                Rect::from_center_size(pos2(rect.left() + 1.5, rect.center().y), vec2(3.0, bar)),
                 2.0,
                 ACCENT,
             );
@@ -1624,14 +1723,20 @@ impl App {
         title: &str,
         radius: u8,
     ) {
-        match self.icons.get(ui.ctx(), id, url) {
-            Some(texture) => {
-                egui::Image::from_texture((texture, rect.size()))
-                    .corner_radius(radius)
-                    .paint_at(ui, rect);
-            }
-            None => letter_tile(ui, rect, title, radius),
+        // Thumbnails fade in over their letter tile instead of popping in.
+        let Some(texture) = self.icons.get(ui.ctx(), id, url) else {
+            letter_tile(ui, rect, title, radius);
+            return;
+        };
+        let since = self.icons.loaded_at.get(id).copied().unwrap_or(0.0);
+        let t = fade_since(ui.ctx(), since, 0.3);
+        if t < 1.0 {
+            letter_tile(ui, rect, title, radius);
         }
+        egui::Image::from_texture((texture, rect.size()))
+            .corner_radius(radius)
+            .tint(Color32::WHITE.gamma_multiply(t))
+            .paint_at(ui, rect);
     }
 
     fn header(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
@@ -1645,9 +1750,23 @@ impl App {
         let name = profile.name.clone();
         let summary = format!("{} mods · {}", items.len(), self.size_text(profile));
         let has_edits = !profile.optional_custom_files.source_url.is_empty();
-        ui.horizontal(|ui| {
+        let (banner, _) = ui.allocate_exact_size(vec2(ui.available_width(), 138.0), Sense::hover());
+        self.paint_banner(ui, banner);
+        let mut content = ui.new_child(
+            egui::UiBuilder::new()
+                .max_rect(banner.shrink2(vec2(22.0, 18.0)))
+                .layout(Layout::bottom_up(Align::LEFT)),
+        );
+        let row = vec2(content.available_width(), 78.0);
+        content.allocate_ui_with_layout(row, Layout::left_to_right(Align::Max), |ui| {
             ui.vertical(|ui| {
-                ui.label(semibold(&name, 24.0));
+                ui.label(
+                    RichText::new("PRESET")
+                        .size(11.0)
+                        .color(MUTED)
+                        .extra_letter_spacing(1.5),
+                );
+                ui.label(semibold(&name, 26.0));
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 0.0;
                     ui.label(RichText::new(summary).color(MUTED));
@@ -1665,15 +1784,20 @@ impl App {
                     }
                 });
             });
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            ui.with_layout(Layout::right_to_left(Align::Max), |ui| {
                 if let Some(job) = &self.job {
                     ui.vertical(|ui| {
                         ui.set_width(260.0);
                         ui.add(
-                            egui::ProgressBar::new(job.fraction)
-                                .desired_height(6.0)
-                                .fill(ACCENT)
-                                .corner_radius(3),
+                            egui::ProgressBar::new(ease_to(
+                                ctx,
+                                Id::new("job-progress"),
+                                job.fraction,
+                                0.35,
+                            ))
+                            .desired_height(6.0)
+                            .fill(ACCENT)
+                            .corner_radius(3),
                         );
                         ui.label(RichText::new(&job.label).size(12.0).color(MUTED));
                     });
@@ -1709,22 +1833,11 @@ impl App {
                     }
                 });
                 ui.add_space(4.0);
-                let play = ui.add_enabled(
-                    !self.busy(),
-                    primary_button("▶  Play").min_size(vec2(112.0, 36.0)),
-                );
-                let glow = ease_bool(ui, play.id.with("glow"), play.hovered() && play.enabled());
-                if glow > 0.0 {
-                    for (grow, alpha) in [(2.0, 0.45), (5.0, 0.18)] {
-                        ui.painter().rect_stroke(
-                            play.rect.expand(grow * glow),
-                            4.0 + grow,
-                            Stroke::new(2.0, ACCENT.gamma_multiply(alpha * glow)),
-                            egui::StrokeKind::Outside,
-                        );
-                    }
-                }
-                if play
+                if ui
+                    .add_enabled(
+                        !self.busy(),
+                        primary_button("▶  Play").min_size(vec2(112.0, 36.0)),
+                    )
                     .on_hover_text("Apply this preset and start Garry's Mod")
                     .clicked()
                 {
@@ -1732,6 +1845,358 @@ impl App {
                 }
             });
         });
+    }
+
+    /// Paints the preset banner: a staggered mosaic of the preset's mod thumbnails that fades
+    /// into the page behind the title, and drifts slightly with the pointer.
+    fn paint_banner(&mut self, ui: &mut egui::Ui, banner: Rect) {
+        let radius = 12u8;
+        let painter = ui.painter_at(banner);
+        painter.rect_filled(banner, radius, ROW);
+        paint_hgradient(
+            &painter,
+            banner,
+            Color32::TRANSPARENT,
+            ACCENT.gamma_multiply(0.16),
+        );
+
+        let tiles: Vec<(String, String, String)> = self
+            .profile()
+            .workshop
+            .items
+            .iter()
+            .filter(|i| i.available)
+            .map(|item| {
+                let url = self
+                    .meta
+                    .get(&item.id)
+                    .map(|m| m.preview_url.clone())
+                    .unwrap_or_default();
+                (item.id.clone(), url, self.title_of(item).to_owned())
+            })
+            .collect();
+
+        let ctx = ui.ctx().clone();
+        let pointer = ui
+            .rect_contains_pointer(banner)
+            .then(|| ctx.pointer_hover_pos())
+            .flatten()
+            .map_or(0.0, |p| (p.x - banner.center().x) / banner.width());
+        let drift = ease_to(&ctx, Id::new("banner-drift"), -pointer * 14.0, 0.6);
+
+        let mut clipped = ui.new_child(egui::UiBuilder::new().max_rect(banner));
+        clipped.set_clip_rect(banner.intersect(ui.clip_rect()));
+        let gap = 6.0;
+        let tile = (banner.height() - gap) / 2.0;
+        let step = tile + gap;
+        let columns = (banner.width() / step).ceil() as usize + 1;
+        let mut next = tiles.iter();
+        // Fill from the right edge, where the fade is lightest, so small presets still show off.
+        'fill: for column in 0..columns {
+            let x = banner.right() - 10.0 - step * (column as f32 + 1.0) + gap + drift;
+            let stagger = if column % 2 == 1 { -tile / 2.0 } else { 0.0 };
+            for row in 0..3 {
+                let Some((id, url, title)) = next.next() else {
+                    break 'fill;
+                };
+                let y = banner.top() + stagger + step * row as f32;
+                let cell = Rect::from_min_size(pos2(x, y), vec2(tile, tile));
+                self.draw_icon(&clipped, cell, id, url, title, 8);
+            }
+        }
+
+        // Dim the mosaic, then fade it out toward the title on the left.
+        painter.rect_filled(banner, radius, BG.gamma_multiply(0.45));
+        let fade = Rect::from_min_max(banner.min, pos2(banner.right() - 60.0, banner.bottom()));
+        paint_hgradient(
+            &painter,
+            fade,
+            BG.gamma_multiply(0.97),
+            Color32::TRANSPARENT,
+        );
+        let bottom = Rect::from_min_max(pos2(banner.left(), banner.center().y), banner.max);
+        paint_vgradient(
+            &painter,
+            bottom,
+            Color32::TRANSPARENT,
+            BG.gamma_multiply(0.55),
+        );
+        // A thin bar along the bottom shows how the preset's mods break down by status.
+        let counts = self.status_counts();
+        let total = counts.iter().sum::<usize>().max(1) as f32;
+        let strip = Rect::from_min_max(pos2(banner.left(), banner.bottom() - 4.0), banner.max);
+        let mut x = strip.left();
+        for (group, (_, color)) in STATUS_GROUPS.iter().enumerate() {
+            let share = ease_to(
+                &ctx,
+                Id::new(("status-share", group)),
+                counts[group] as f32 / total,
+                0.5,
+            );
+            let width = share * strip.width();
+            painter.rect_filled(
+                Rect::from_min_size(pos2(x, strip.top()), vec2(width, strip.height())),
+                0.0,
+                *color,
+            );
+            x += width;
+        }
+        // Round the corners by masking them with the page color.
+        ui.painter().rect_stroke(
+            banner,
+            radius,
+            Stroke::new(10.0, BG),
+            egui::StrokeKind::Outside,
+        );
+        ui.painter().rect_stroke(
+            banner,
+            radius,
+            Stroke::new(1.0, Color32::from_white_alpha(10)),
+            egui::StrokeKind::Inside,
+        );
+    }
+
+    fn commands(&self) -> Vec<(String, &'static str, Command)> {
+        let mut list: Vec<(String, &'static str, Command)> = self
+            .profiles
+            .iter()
+            .enumerate()
+            .map(|(i, p)| (p.name.clone(), "Preset", Command::Preset(i)))
+            .collect();
+        let preset = self.profile().name.clone();
+        let go = [
+            ("Mods", Command::Tab(Tab::Mods)),
+            ("Binds", Command::Tab(Tab::Binds)),
+            ("Preset settings", Command::Tab(Tab::Settings)),
+            ("Details", Command::Tab(Tab::Details)),
+            ("Library", Command::Library),
+            ("App settings", Command::Settings),
+        ];
+        list.extend(go.into_iter().map(|(n, c)| (n.to_owned(), "Go to", c)));
+        let actions = [
+            (format!("Play {preset}"), Command::Play),
+            ("Apply without launching".to_owned(), Command::ApplyOnly),
+            ("Review changes".to_owned(), Command::Review),
+            ("Undo last apply".to_owned(), Command::Undo),
+            ("Add mods".to_owned(), Command::AddMods),
+            (
+                if self.state.mods_grid {
+                    "Show mods as a list"
+                } else {
+                    "Show mods as a grid"
+                }
+                .to_owned(),
+                Command::ToggleGrid,
+            ),
+            ("New preset".to_owned(), Command::NewPreset),
+            ("Import preset or collection".to_owned(), Command::Import),
+            ("Duplicate preset".to_owned(), Command::Duplicate),
+            ("Share preset as file".to_owned(), Command::Share),
+            (
+                "Open Workshop collection".to_owned(),
+                Command::OpenCollection,
+            ),
+        ];
+        list.extend(actions.into_iter().map(|(n, c)| (n, "Action", c)));
+        list
+    }
+
+    fn run_command(&mut self, ctx: &egui::Context, command: Command) {
+        match command {
+            Command::Preset(index) => self.select(index),
+            Command::Tab(tab) => {
+                self.view = View::Preset;
+                self.tab = tab;
+            }
+            Command::Library => self.view = View::Library,
+            Command::Settings => self.view = View::Settings,
+            Command::Play if !self.busy() => self.start_apply(ctx, true),
+            Command::ApplyOnly if !self.busy() => self.start_apply(ctx, false),
+            Command::Undo if !self.busy() => self.start_restore(ctx),
+            Command::Play | Command::ApplyOnly | Command::Undo => {
+                self.notify(ctx, Err("Wait for the current task to finish.".into()));
+            }
+            Command::Review => self.open_review(),
+            Command::Share => self.export_preset(ctx),
+            Command::Duplicate => {
+                let name = format!("{} copy", self.profile().name);
+                self.create_preset(ctx, &name, true);
+            }
+            Command::NewPreset => self.new_preset = Some(String::new()),
+            Command::Import => {
+                self.import_link = Some(String::new());
+                self.import_error = None;
+            }
+            Command::AddMods => {
+                self.view = View::Preset;
+                self.tab = Tab::Mods;
+                self.adding = true;
+            }
+            Command::OpenCollection => {
+                let url = collection_url(self.profile());
+                self.open_link(ctx, &url);
+            }
+            Command::ToggleGrid => {
+                self.view = View::Preset;
+                self.tab = Tab::Mods;
+                self.state.mods_grid = !self.state.mods_grid;
+                let _ = core::save_state(&self.dir, &self.state);
+            }
+        }
+    }
+
+    fn open_palette(&mut self, ctx: &egui::Context) {
+        self.palette = Some(Palette {
+            query: String::new(),
+            selected: 0,
+            opened_at: ctx.input(|i| i.time),
+        });
+    }
+
+    fn palette_modal(&mut self, ctx: &egui::Context) {
+        let shortcut = egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, egui::Key::K);
+        if ctx.input_mut(|i| i.consume_shortcut(&shortcut)) {
+            if self.palette.is_some() {
+                self.palette = None;
+            } else if self.new_preset.is_none()
+                && self.import_link.is_none()
+                && self.review.is_none()
+            {
+                self.open_palette(ctx);
+            }
+        }
+        let Some(mut palette) = self.palette.take() else {
+            return;
+        };
+        let (down, up, enter) = ctx.input_mut(|i| {
+            (
+                i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowDown),
+                i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowUp),
+                i.consume_key(egui::Modifiers::NONE, egui::Key::Enter),
+            )
+        });
+        let mut matches: Vec<(i32, (String, &'static str, Command))> = self
+            .commands()
+            .into_iter()
+            .filter_map(|entry| Some((match_score(&palette.query, &entry.0)?, entry)))
+            .collect();
+        matches.sort_by(|a, b| b.0.cmp(&a.0));
+        matches.truncate(8);
+        if !matches.is_empty() {
+            let last = matches.len() - 1;
+            if down {
+                palette.selected = if palette.selected >= last {
+                    0
+                } else {
+                    palette.selected + 1
+                };
+            }
+            if up {
+                palette.selected = if palette.selected == 0 {
+                    last
+                } else {
+                    palette.selected - 1
+                };
+            }
+            palette.selected = palette.selected.min(last);
+        }
+        let t = fade_since(ctx, palette.opened_at, 0.16);
+        let id = Id::new("palette");
+        let mut chosen = None;
+        let modal = egui::Modal::new(id)
+            .area(
+                egui::Modal::default_area(id)
+                    .anchor(Align2::CENTER_TOP, vec2(0.0, 72.0 + 10.0 * (1.0 - t))),
+            )
+            .backdrop_color(Color32::from_black_alpha((110.0 * t) as u8))
+            .frame(modal_frame().inner_margin(Margin::same(8)))
+            .show(ctx, |ui| {
+                ui.multiply_opacity(t);
+                ui.set_width(480.0);
+                let edit = ui.add(
+                    egui::TextEdit::singleline(&mut palette.query)
+                        .hint_text("Jump to a preset, tab or action…")
+                        .font(FontId::proportional(16.0))
+                        .frame(false)
+                        .margin(Margin::symmetric(10, 8))
+                        .desired_width(f32::INFINITY),
+                );
+                edit.request_focus();
+                if edit.changed() {
+                    palette.selected = 0;
+                }
+                let line = ui.cursor().top() + 2.0;
+                ui.painter()
+                    .hline(ui.max_rect().x_range(), line, Stroke::new(1.0, LINE));
+                ui.add_space(8.0);
+                if matches.is_empty() {
+                    ui.add_space(6.0);
+                    ui.label(RichText::new("  Nothing matches.").color(FAINT));
+                    ui.add_space(6.0);
+                }
+                let moved = ui.input(|i| i.pointer.delta() != egui::Vec2::ZERO);
+                ui.spacing_mut().item_spacing.y = 2.0;
+                for (index, (_, (label, kind, command))) in matches.iter().enumerate() {
+                    let (rect, response) =
+                        ui.allocate_exact_size(vec2(ui.available_width(), 34.0), Sense::click());
+                    if response.hovered() && moved {
+                        palette.selected = index;
+                    }
+                    let on = ui.ctx().animate_bool_with_time(
+                        id.with(("row", index)),
+                        index == palette.selected,
+                        0.08,
+                    );
+                    if on > 0.0 {
+                        ui.painter()
+                            .rect_filled(rect, 7.0, ROW_HOVER.gamma_multiply(on));
+                        ui.painter().rect_filled(
+                            Rect::from_center_size(
+                                pos2(rect.left() + 1.5, rect.center().y),
+                                vec2(3.0, 16.0 * on),
+                            ),
+                            2.0,
+                            ACCENT,
+                        );
+                    }
+                    paint_line(
+                        ui,
+                        pos2(rect.left() + 14.0, rect.center().y - 9.0),
+                        label,
+                        FontId::proportional(14.0),
+                        if index == palette.selected {
+                            TEXT
+                        } else {
+                            lerp_color(MUTED, TEXT, 0.5)
+                        },
+                        rect.width() - 110.0,
+                    );
+                    ui.painter().text(
+                        pos2(rect.right() - 12.0, rect.center().y),
+                        Align2::RIGHT_CENTER,
+                        *kind,
+                        FontId::proportional(12.0),
+                        FAINT,
+                    );
+                    if response.clicked() {
+                        chosen = Some(*command);
+                    }
+                }
+                ui.add_space(6.0);
+                ui.label(
+                    RichText::new("  Arrow keys to move · Enter to open · Esc to close")
+                        .size(11.0)
+                        .color(FAINT),
+                );
+            });
+        if enter {
+            chosen = chosen.or(matches.get(palette.selected).map(|m| m.1.2));
+        }
+        if let Some(command) = chosen {
+            self.run_command(ctx, command);
+        } else if !modal.should_close() {
+            self.palette = Some(palette);
+        }
     }
 
     fn open_link(&mut self, ctx: &egui::Context, url: &str) {
@@ -1755,39 +2220,37 @@ impl App {
             (Tab::Details, "Details".to_owned()),
         ];
         let top = ui.cursor().top();
-        let mut underline = None;
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 22.0;
+            let mut underline = None;
             for (tab, label) in tabs {
                 let active = self.tab == tab;
-                let shown = ease_bool(ui, Id::new(("tab-active", tab as u8)), active);
                 let response = ui
                     .add(
-                        egui::Label::new(
-                            RichText::new(label)
-                                .size(14.0)
-                                .color(lerp_color(MUTED, TEXT, shown)),
-                        )
+                        egui::Label::new(RichText::new(label).size(14.0).color(if active {
+                            TEXT
+                        } else {
+                            MUTED
+                        }))
                         .sense(Sense::click()),
                     )
                     .on_hover_cursor(egui::CursorIcon::PointingHand);
                 if active {
-                    underline = Some((response.rect.x_range(), response.rect.bottom() + 7.0));
+                    underline = Some(response.rect);
                 }
                 if response.clicked() {
                     self.tab = tab;
                 }
             }
+            // The underline glides between tabs instead of jumping.
+            if let Some(rect) = underline {
+                let ctx = ui.ctx().clone();
+                let left = ease_to(&ctx, Id::new("tab-underline-left"), rect.left(), 0.22);
+                let right = ease_to(&ctx, Id::new("tab-underline-right"), rect.right(), 0.22);
+                ui.painter()
+                    .hline(left..=right, rect.bottom() + 7.0, Stroke::new(2.0, ACCENT));
+            }
         });
-        if let Some((range, y)) = underline {
-            // The underline glides to the chosen tab instead of jumping.
-            let ctx = ui.ctx();
-            let left = ctx.animate_value_with_time(Id::new("tab-underline-left"), range.min, 0.18);
-            let right =
-                ctx.animate_value_with_time(Id::new("tab-underline-right"), range.max, 0.18);
-            ui.painter()
-                .hline(left..=right, y, Stroke::new(2.0, ACCENT));
-        }
         let y = ui.cursor().top().max(top + 26.0) + 1.0;
         ui.painter()
             .hline(ui.max_rect().x_range(), y, Stroke::new(1.0, LINE));
@@ -1798,6 +2261,7 @@ impl App {
         self.header(ui, ctx);
         ui.add_space(14.0);
         self.tabs(ui);
+        ui.multiply_opacity(fade_since(ctx, self.tab_changed_at, 0.16));
         match self.tab {
             Tab::Mods => self.mods_tab(ui, ctx),
             Tab::Binds => self.binds_tab(ui, ctx),
@@ -1852,6 +2316,11 @@ impl App {
                 if ui.add(soft_button(label)).clicked() {
                     self.adding = !self.adding;
                 }
+                let mut grid = self.state.mods_grid;
+                if segmented(ui, &mut grid, ["List", "Grid"]) {
+                    self.state.mods_grid = grid;
+                    let _ = core::save_state(&self.dir, &self.state);
+                }
                 if ui
                     .add_enabled(
                         !self.busy() && self.profile().sync.addons,
@@ -1898,12 +2367,42 @@ impl App {
             self.add_panel(ui, ctx);
             ui.add_space(10.0);
         }
+        let counts = self.status_counts();
+        if counts.iter().filter(|c| **c > 0).count() > 1 || self.status_filter.is_some() {
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 6.0;
+                let total = counts.iter().sum::<usize>();
+                if chip(
+                    ui,
+                    &format!("All  {total}"),
+                    None,
+                    self.status_filter.is_none(),
+                )
+                .clicked()
+                {
+                    self.status_filter = None;
+                }
+                for (group, (name, color)) in STATUS_GROUPS.iter().enumerate() {
+                    let selected = self.status_filter == Some(group);
+                    if counts[group] == 0 && !selected {
+                        continue;
+                    }
+                    let text = format!("{name}  {}", counts[group]);
+                    if chip(ui, &text, Some(*color), selected).clicked() {
+                        self.status_filter = if selected { None } else { Some(group) };
+                    }
+                }
+            });
+            ui.add_space(8.0);
+        }
+        let status_filter = self.status_filter;
         let filter = self.filter.trim().to_lowercase();
         let rows: Vec<Row> = self
             .profile()
             .workshop
             .items
             .iter()
+            .filter(|item| status_filter.is_none_or(|g| self.mod_state(item).group() == g))
             .filter(|item| {
                 filter.is_empty()
                     || item.id.contains(&filter)
@@ -1929,7 +2428,7 @@ impl App {
             ui.add_space(30.0);
             ui.vertical_centered(|ui| {
                 ui.label(
-                    RichText::new(if filter.is_empty() {
+                    RichText::new(if filter.is_empty() && status_filter.is_none() {
                         "No mods yet. Use Add mods to find some."
                     } else {
                         "Nothing matches that filter."
@@ -1940,26 +2439,43 @@ impl App {
             return;
         }
         let mut remove = None;
-        let since = self.content_at;
-        egui::ScrollArea::vertical()
-            .auto_shrink([false, false])
-            .show_rows(ui, ROW_HEIGHT, rows.len(), |ui, range| {
-                ui.spacing_mut().item_spacing.y = 0.0;
-                for (shown, row) in rows[range].iter().enumerate() {
-                    // Rows settle in one after another when the list first appears.
-                    let delay = (shown as f64 * 0.025).min(0.3);
-                    let alpha = entrance(ui, since, delay, 0.22);
-                    let removed = ui
-                        .scope(|ui| {
-                            ui.multiply_opacity(alpha);
-                            self.mod_row(ui, ctx, row)
-                        })
-                        .inner;
-                    if removed {
-                        remove = Some(row.id.clone());
+        if self.state.mods_grid {
+            let gap = 12.0;
+            let width = ui.available_width() - 6.0;
+            let columns = ((width + gap) / (150.0 + gap)).floor().max(1.0) as usize;
+            let card_width = (width - gap * (columns - 1) as f32) / columns as f32;
+            let card = vec2(card_width, card_width + 48.0);
+            let lines = rows.len().div_ceil(columns);
+            // show_rows spaces rows by the item spacing in effect when it is called.
+            ui.spacing_mut().item_spacing.y = gap;
+            egui::ScrollArea::vertical()
+                .auto_shrink([false, false])
+                .show_rows(ui, card.y, lines, |ui, range| {
+                    ui.add_space(4.0);
+                    for line in range {
+                        ui.horizontal(|ui| {
+                            ui.spacing_mut().item_spacing.x = gap;
+                            let end = (line * columns + columns).min(rows.len());
+                            for row in &rows[line * columns..end] {
+                                if self.mod_card(ui, ctx, row, card) {
+                                    remove = Some(row.id.clone());
+                                }
+                            }
+                        });
                     }
-                }
-            });
+                });
+        } else {
+            ui.spacing_mut().item_spacing.y = 0.0;
+            egui::ScrollArea::vertical()
+                .auto_shrink([false, false])
+                .show_rows(ui, ROW_HEIGHT, rows.len(), |ui, range| {
+                    for row in &rows[range] {
+                        if self.mod_row(ui, ctx, row) {
+                            remove = Some(row.id.clone());
+                        }
+                    }
+                });
+        }
         if let Some(id) = remove {
             self.profile_mut()
                 .workshop
@@ -1974,7 +2490,9 @@ impl App {
         let (rect, response) =
             ui.allocate_exact_size(vec2(ui.available_width(), ROW_HEIGHT), Sense::click());
         let hovered = ui.rect_contains_pointer(rect);
-        let hover = ease_bool(ui, response.id.with("hover"), hovered);
+        let hover = ui
+            .ctx()
+            .animate_bool_with_time(Id::new(("mod-row", &row.id)), hovered, 0.12);
         if hover > 0.0 {
             ui.painter()
                 .rect_filled(rect.shrink2(vec2(0.0, 2.0)), 7.0, ROW.gamma_multiply(hover));
@@ -2032,6 +2550,18 @@ impl App {
             FontId::proportional(13.0),
             if dim { FAINT } else { MUTED },
         );
+        self.mod_interactions(ctx, response, row) || removed
+    }
+
+    /// Library tooltip, right-click menu and double-click for a mod row or card.
+    /// Returns true when the user removes the mod.
+    fn mod_interactions(
+        &mut self,
+        ctx: &egui::Context,
+        response: egui::Response,
+        row: &Row,
+    ) -> bool {
+        let mut removed = false;
         if let Some(entry) = self.library.get(&row.id) {
             response.clone().on_hover_text(format!(
                 "In library: {} (full size {})",
@@ -2055,6 +2585,85 @@ impl App {
             self.open_link(ctx, &url);
         }
         removed
+    }
+
+    /// Draws one mod as a thumbnail card that lifts on hover. Returns true when it is removed.
+    fn mod_card(
+        &mut self,
+        ui: &mut egui::Ui,
+        ctx: &egui::Context,
+        row: &Row,
+        size: egui::Vec2,
+    ) -> bool {
+        let (rect, response) = ui.allocate_exact_size(size, Sense::click());
+        let hovered = ui.rect_contains_pointer(rect);
+        let hover = ui
+            .ctx()
+            .animate_bool_with_time(Id::new(("mod-card", &row.id)), hovered, 0.15);
+        let card = rect.translate(vec2(0.0, -3.0 * hover));
+        if hover > 0.0 {
+            let shadow = egui::Shadow {
+                offset: [0, 5],
+                blur: 18,
+                spread: 0,
+                color: Color32::from_black_alpha((110.0 * hover) as u8),
+            };
+            ui.painter()
+                .add(shadow.as_shape(card, CornerRadius::same(10)));
+        }
+        ui.painter().rect_filled(
+            card,
+            10.0,
+            lerp_color(Color32::from_rgb(27, 30, 35), ROW, hover),
+        );
+        let side = card.width() - 16.0;
+        let image = Rect::from_min_size(card.min + vec2(8.0, 8.0), vec2(side, side));
+        self.draw_icon(ui, image, &row.id, &row.url, &row.title, 7);
+        let dim = row.state == ModState::Unavailable;
+        if dim {
+            ui.painter().rect_filled(image, 7.0, BG.gamma_multiply(0.6));
+        }
+        let (state_text, state_color) = row.state.describe();
+        paint_line(
+            ui,
+            pos2(image.left() + 1.0, image.bottom() + 7.0),
+            &row.title,
+            FontId::proportional(13.0),
+            if dim { FAINT } else { TEXT },
+            side,
+        );
+        let status_y = image.bottom() + 31.0;
+        ui.painter()
+            .circle_filled(pos2(image.left() + 4.0, status_y), 3.0, state_color);
+        let detail = match row.size {
+            Some(size) => format!("{state_text} · {}", format_size(size)),
+            None => state_text.to_owned(),
+        };
+        paint_line(
+            ui,
+            pos2(image.left() + 12.0, status_y - 8.0),
+            &detail,
+            FontId::proportional(12.0),
+            MUTED,
+            side - 12.0,
+        );
+        let mut removed = false;
+        if hover > 0.5 {
+            let button =
+                Rect::from_center_size(image.right_top() + vec2(-15.0, 15.0), vec2(24.0, 24.0));
+            ui.painter()
+                .circle_filled(button.center(), 12.0, Color32::from_black_alpha(160));
+            if put_free(ui, button, icon_button("×"), true)
+                .on_hover_text("Remove from preset")
+                .clicked()
+            {
+                removed = true;
+            }
+        }
+        let response = response
+            .on_hover_text(&row.title)
+            .on_hover_cursor(egui::CursorIcon::PointingHand);
+        self.mod_interactions(ctx, response, row) || removed
     }
 
     fn add_panel(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
@@ -2139,17 +2748,17 @@ impl App {
                             for index in 0..self.results.len() {
                                 let result = self.results[index].clone();
                                 let alpha =
-                                    entrance(ui, since, (index.min(12) as f64) * 0.025, 0.2);
+                                    fade_since(ctx, since + index.min(12) as f64 * 0.025, 0.2);
                                 ui.scope(|ui| {
                                     ui.multiply_opacity(alpha);
                                     let (rect, response) = ui.allocate_exact_size(
                                         vec2(ui.available_width(), 46.0),
                                         Sense::click(),
                                     );
-                                    let hover = ease_bool(
-                                        ui,
+                                    let hover = ctx.animate_bool_with_time(
                                         response.id.with("hover"),
                                         ui.rect_contains_pointer(rect),
+                                        0.12,
                                     );
                                     if hover > 0.0 {
                                         ui.painter().rect_filled(
@@ -2558,9 +3167,14 @@ impl App {
                     ui.vertical(|ui| {
                         ui.set_width(260.0);
                         ui.add(
-                            egui::ProgressBar::new(job.fraction)
-                                .desired_height(6.0)
-                                .fill(ACCENT),
+                            egui::ProgressBar::new(ease_to(
+                                ctx,
+                                Id::new("job-progress"),
+                                job.fraction,
+                                0.35,
+                            ))
+                            .desired_height(6.0)
+                            .fill(ACCENT),
                         );
                         ui.label(RichText::new(&job.label).size(12.0).color(MUTED));
                     });
@@ -3065,11 +3679,23 @@ impl App {
             return;
         }
         ctx.request_repaint_after(Duration::from_millis(250));
+        // Slide up and fade in, then fade out just before it expires.
+        let enter = fade_since(ctx, toast.shown_at, 0.22);
+        let leave = ((toast.shown_at + life - now) as f32 / 0.3).clamp(0.0, 1.0);
+        if leave < 1.0 {
+            ctx.request_repaint();
+        }
+        let shown = enter.min(ease_out(leave));
         let mut dismiss = false;
         egui::Area::new(Id::new("toast"))
-            .anchor(Align2::CENTER_BOTTOM, vec2(118.0, -22.0))
+            .anchor(
+                Align2::CENTER_BOTTOM,
+                vec2(118.0, -22.0 + 14.0 * (1.0 - enter)),
+            )
             .order(egui::Order::Foreground)
+            .fade_in(false)
             .show(ctx, |ui| {
+                ui.multiply_opacity(shown);
                 let response = Frame::new()
                     .fill(Color32::from_rgb(44, 48, 55))
                     .stroke(Stroke::new(1.0, if toast.error { RED } else { LINE }))
@@ -3121,12 +3747,17 @@ impl eframe::App for App {
             ctx.request_repaint_after(Duration::from_millis(100));
         }
         self.sidebar(ctx);
-        let key = (self.view, self.selected, self.tab);
-        if key != self.content_key {
-            self.content_key = key;
-            self.content_at = now;
+        // Fade the page in when switching views or presets, and the tab body when switching tabs.
+        let shown = (self.view, self.selected);
+        if shown != self.shown_view {
+            self.shown_view = shown;
+            self.view_changed_at = now;
         }
-        let since = self.content_at;
+        if self.tab != self.shown_tab {
+            self.shown_tab = self.tab;
+            self.tab_changed_at = now;
+        }
+        let page_fade = fade_since(ctx, self.view_changed_at, 0.18);
         egui::CentralPanel::default()
             .frame(Frame::new().fill(BG).inner_margin(Margin {
                 left: 28,
@@ -3135,10 +3766,7 @@ impl eframe::App for App {
                 bottom: 12,
             }))
             .show(ctx, |ui| {
-                // New pages drift up and fade in rather than popping.
-                let shown = entrance(ui, since, 0.0, 0.2);
-                ui.multiply_opacity(shown);
-                ui.add_space((1.0 - shown) * 10.0);
+                ui.multiply_opacity(page_fade);
                 match self.view {
                     View::Preset => self.preset_view(ui, ctx),
                     View::Library => self.library_view(ui, ctx),
@@ -3152,6 +3780,7 @@ impl eframe::App for App {
         self.new_preset_modal(ctx);
         self.import_modal(ctx);
         self.review_modal(ctx);
+        self.palette_modal(ctx);
         self.toast(ctx);
         #[cfg(feature = "promo")]
         self.promo.paint(ctx);
@@ -3190,21 +3819,74 @@ fn empty_state(ui: &mut egui::Ui, text: &str) {
     ui.add_space(6.0);
 }
 
-fn primary_button(text: &str) -> egui::Button<'_> {
-    egui::Button::new(
-        RichText::new(text)
-            .color(Color32::WHITE)
-            .family(FontFamily::Name("semibold".into())),
-    )
-    .fill(ACCENT)
-    .stroke(Stroke::NONE)
-    .min_size(vec2(0.0, 30.0))
+fn primary_button(text: &str) -> FeedbackButton<'_> {
+    FeedbackButton {
+        button: egui::Button::new(
+            RichText::new(text)
+                .color(Color32::WHITE)
+                .family(FontFamily::Name("semibold".into())),
+        )
+        .fill(ACCENT)
+        .stroke(Stroke::NONE)
+        .min_size(vec2(0.0, 30.0)),
+        glow: true,
+    }
 }
 
-fn soft_button(text: &str) -> egui::Button<'_> {
-    egui::Button::new(RichText::new(text).color(TEXT))
-        .fill(ROW_HOVER)
-        .min_size(vec2(0.0, 30.0))
+fn soft_button(text: &str) -> FeedbackButton<'_> {
+    FeedbackButton {
+        button: egui::Button::new(RichText::new(text).color(TEXT))
+            .fill(ROW_HOVER)
+            .min_size(vec2(0.0, 30.0)),
+        glow: false,
+    }
+}
+
+/// A filled button that still reacts to hover and press. A custom fill turns off egui's own
+/// hover colors, so this brightens on hover, darkens while held, and primary buttons glow.
+struct FeedbackButton<'a> {
+    button: egui::Button<'a>,
+    glow: bool,
+}
+
+impl FeedbackButton<'_> {
+    fn min_size(mut self, size: egui::Vec2) -> Self {
+        self.button = self.button.min_size(size);
+        self
+    }
+}
+
+impl egui::Widget for FeedbackButton<'_> {
+    fn ui(self, ui: &mut egui::Ui) -> egui::Response {
+        let behind = ui.painter().add(egui::Shape::Noop);
+        let response = ui.add(self.button);
+        let hover = ui.ctx().animate_bool_with_time(
+            response.id.with("hover"),
+            response.hovered() && response.enabled(),
+            0.12,
+        );
+        if hover > 0.0 {
+            if self.glow {
+                let shadow = egui::Shadow {
+                    offset: [0, 2],
+                    blur: 14,
+                    spread: 0,
+                    color: ACCENT.gamma_multiply(0.45 * hover),
+                };
+                ui.painter().set(
+                    behind,
+                    shadow.as_shape(response.rect, CornerRadius::same(6)),
+                );
+            }
+            let overlay = if response.is_pointer_button_down_on() {
+                Color32::from_black_alpha(45)
+            } else {
+                Color32::from_white_alpha((18.0 * hover) as u8)
+            };
+            ui.painter().rect_filled(response.rect, 6.0, overlay);
+        }
+        response
+    }
 }
 
 /// Places a widget at `rect` without moving the parent's cursor, so painted rows keep their height.
@@ -3229,37 +3911,149 @@ fn icon_button(text: &str) -> egui::Button<'_> {
 
 fn nav_item(ui: &mut egui::Ui, text: &str, active: bool) -> egui::Response {
     let (rect, response) = ui.allocate_exact_size(vec2(ui.available_width(), 34.0), Sense::click());
-    let shown = ease_bool(ui, response.id.with("active"), active);
-    let hover = ease_bool(ui, response.id.with("hover"), response.hovered());
-    let fill = shown.max(hover * 0.6);
-    if fill > 0.0 {
+    let hover =
+        ui.ctx()
+            .animate_bool_with_time(response.id.with("hover"), response.hovered(), 0.12);
+    if active {
+        ui.painter().rect_filled(rect, 7.0, ROW);
+    } else if hover > 0.0 {
         ui.painter()
-            .rect_filled(rect, 7.0, ROW.gamma_multiply(fill));
+            .rect_filled(rect, 7.0, ROW.gamma_multiply(0.6 * hover));
     }
     ui.painter().text(
-        pos2(rect.left() + 12.0, rect.center().y),
+        pos2(rect.left() + 12.0 + 2.0 * hover, rect.center().y),
         Align2::LEFT_CENTER,
         text,
         FontId::proportional(14.0),
-        lerp_color(MUTED, TEXT, shown),
+        if active {
+            TEXT
+        } else {
+            lerp_color(MUTED, TEXT, hover * 0.6)
+        },
     );
     response.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
-/// Eased 0..1 for a highlight, so hover and selection fade instead of snapping.
-fn ease_bool(ui: &egui::Ui, id: Id, on: bool) -> f32 {
-    ui.ctx()
-        .animate_bool_with_time_and_easing(id, on, 0.16, egui::emath::easing::cubic_out)
+/// The sidebar's "Search" field that opens the quick switcher.
+fn search_pill(ui: &mut egui::Ui) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(vec2(ui.available_width(), 30.0), Sense::click());
+    let hover =
+        ui.ctx()
+            .animate_bool_with_time(response.id.with("hover"), response.hovered(), 0.12);
+    ui.painter()
+        .rect_filled(rect, 7.0, lerp_color(INPUT, ROW, hover));
+    ui.painter().rect_stroke(
+        rect,
+        7.0,
+        Stroke::new(1.0, lerp_color(LINE, ACCENT.gamma_multiply(0.6), hover)),
+        egui::StrokeKind::Inside,
+    );
+    ui.painter().text(
+        pos2(rect.left() + 11.0, rect.center().y),
+        Align2::LEFT_CENTER,
+        "Search…",
+        FontId::proportional(13.0),
+        lerp_color(FAINT, MUTED, hover),
+    );
+    let key = Rect::from_min_size(
+        pos2(rect.right() - 50.0, rect.center().y - 9.0),
+        vec2(42.0, 18.0),
+    );
+    ui.painter().rect_filled(key, 4.0, ROW_HOVER);
+    ui.painter().text(
+        key.center(),
+        Align2::CENTER_CENTER,
+        "Ctrl K",
+        FontId::proportional(11.0),
+        MUTED,
+    );
+    response
+        .on_hover_text("Jump to a preset, tab or action (Ctrl+K)")
+        .on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
-/// Eased 0..1 progress of an entrance that began at `since`, after `delay` seconds.
-fn entrance(ui: &egui::Ui, since: f64, delay: f64, duration: f64) -> f32 {
-    let now = ui.input(|i| i.time);
-    let t = ((now - since - delay) / duration).clamp(0.0, 1.0) as f32;
-    if t < 1.0 {
-        ui.ctx().request_repaint();
+/// A pill-shaped filter button, optionally with a colored dot.
+fn chip(ui: &mut egui::Ui, text: &str, color: Option<Color32>, selected: bool) -> egui::Response {
+    let galley = ui
+        .painter()
+        .layout_no_wrap(text.to_owned(), FontId::proportional(12.5), TEXT);
+    let dot_space = if color.is_some() { 14.0 } else { 0.0 };
+    let size = vec2(galley.size().x + dot_space + 22.0, 26.0);
+    let (rect, response) = ui.allocate_exact_size(size, Sense::click());
+    let hover =
+        ui.ctx()
+            .animate_bool_with_time(response.id.with("hover"), response.hovered(), 0.12);
+    let on = ui
+        .ctx()
+        .animate_bool_with_time(response.id.with("on"), selected, 0.15);
+    let fill = lerp_color(BG, ROW, hover.max(on));
+    let tint = color.unwrap_or(ACCENT);
+    ui.painter()
+        .rect_filled(rect, 13.0, lerp_color(fill, tint, 0.18 * on));
+    ui.painter().rect_stroke(
+        rect,
+        13.0,
+        Stroke::new(1.0, lerp_color(LINE, tint, 0.8 * on)),
+        egui::StrokeKind::Inside,
+    );
+    let mut left = rect.left() + 11.0;
+    if let Some(color) = color {
+        ui.painter()
+            .circle_filled(pos2(left + 3.5, rect.center().y), 3.5, color);
+        left += dot_space;
     }
-    egui::emath::easing::cubic_out(t)
+    let text_color = lerp_color(MUTED, TEXT, hover.max(on));
+    ui.painter().galley(
+        pos2(left, rect.center().y - galley.size().y / 2.0),
+        galley,
+        text_color,
+    );
+    response.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+/// A two-option switch with a sliding highlight. Returns true when the choice changes.
+fn segmented(ui: &mut egui::Ui, second: &mut bool, labels: [&str; 2]) -> bool {
+    let size = vec2(104.0, 30.0);
+    let (rect, _) = ui.allocate_exact_size(size, Sense::hover());
+    ui.painter().rect_filled(rect, 7.0, INPUT);
+    let half = rect.width() / 2.0;
+    let t = ui
+        .ctx()
+        .animate_bool_with_time(ui.id().with(labels), *second, 0.18);
+    let knob = Rect::from_min_size(
+        rect.min + vec2(3.0 + (half - 3.0) * ease_out(t), 3.0),
+        vec2(half - 3.0, rect.height() - 6.0),
+    );
+    ui.painter().rect_filled(knob, 5.0, ROW_HOVER);
+    let mut changed = false;
+    for (index, label) in labels.into_iter().enumerate() {
+        let part = Rect::from_min_size(
+            rect.min + vec2(half * index as f32, 0.0),
+            vec2(half, rect.height()),
+        );
+        let response = ui
+            .interact(part, ui.id().with((label, "segment")), Sense::click())
+            .on_hover_cursor(egui::CursorIcon::PointingHand);
+        let active = (index == 1) == *second;
+        if response.clicked() && !active {
+            *second = index == 1;
+            changed = true;
+        }
+        ui.painter().text(
+            part.center(),
+            Align2::CENTER_CENTER,
+            label,
+            FontId::proportional(13.0),
+            if active {
+                TEXT
+            } else if response.hovered() {
+                lerp_color(MUTED, TEXT, 0.5)
+            } else {
+                MUTED
+            },
+        );
+    }
+    changed
 }
 
 fn dot(ui: &mut egui::Ui, color: Color32) {
@@ -3306,6 +4100,65 @@ fn toggle_row(ui: &mut egui::Ui, on: &mut bool, label: &str) -> bool {
 fn lerp_color(a: Color32, b: Color32, t: f32) -> Color32 {
     let mix = |x: u8, y: u8| (x as f32 + (y as f32 - x as f32) * t).round() as u8;
     Color32::from_rgb(mix(a.r(), b.r()), mix(a.g(), b.g()), mix(a.b(), b.b()))
+}
+
+fn paint_hgradient(painter: &egui::Painter, rect: Rect, left: Color32, right: Color32) {
+    paint_gradient(painter, rect, [left, right, right, left]);
+}
+
+fn paint_vgradient(painter: &egui::Painter, rect: Rect, top: Color32, bottom: Color32) {
+    paint_gradient(painter, rect, [top, top, bottom, bottom]);
+}
+
+/// Fills `rect` with colors given for its top-left, top-right, bottom-right and bottom-left corners.
+fn paint_gradient(painter: &egui::Painter, rect: Rect, colors: [Color32; 4]) {
+    let mut mesh = egui::Mesh::default();
+    let corners = [
+        rect.left_top(),
+        rect.right_top(),
+        rect.right_bottom(),
+        rect.left_bottom(),
+    ];
+    for (pos, color) in corners.into_iter().zip(colors) {
+        mesh.colored_vertex(pos, color);
+    }
+    mesh.add_triangle(0, 1, 2);
+    mesh.add_triangle(0, 2, 3);
+    painter.add(mesh);
+}
+
+/// Cubic ease-out, 0..1 → 0..1.
+fn ease_out(t: f32) -> f32 {
+    1.0 - (1.0 - t.clamp(0.0, 1.0)).powi(3)
+}
+
+/// Eased progress (0..1) of an animation that started at `since`; keeps repainting until done.
+fn fade_since(ctx: &egui::Context, since: f64, secs: f32) -> f32 {
+    let t = ((ctx.input(|i| i.time) - since) as f32 / secs).clamp(0.0, 1.0);
+    if t < 1.0 {
+        ctx.request_repaint();
+    }
+    ease_out(t)
+}
+
+/// Glides a value toward `target` with an ease-out, restarting smoothly when the target moves.
+fn ease_to(ctx: &egui::Context, id: Id, target: f32, secs: f32) -> f32 {
+    let now = ctx.input(|i| i.time);
+    let sample = |(from, to, start): (f32, f32, f64)| {
+        let t = ((now - start) as f32 / secs).clamp(0.0, 1.0);
+        (from + (to - from) * ease_out(t), t < 1.0)
+    };
+    let (value, moving) = ctx.data_mut(|d| {
+        let slot = d.get_temp_mut_or_insert_with(id, || (target, target, now));
+        if slot.1 != target {
+            *slot = (sample(*slot).0, target, now);
+        }
+        sample(*slot)
+    });
+    if moving {
+        ctx.request_repaint();
+    }
+    value
 }
 
 /// Paints one line of text, cut off with an ellipsis if it doesn't fit.
@@ -3511,9 +4364,7 @@ fn main() -> eframe::Result {
         .with_title("GMod Manager");
     // Recording builds open off screen without taking focus from whoever is at the PC.
     #[cfg(feature = "promo")]
-    let viewport = viewport
-        .with_active(false)
-        .with_position([12000.0, 0.0]);
+    let viewport = viewport.with_active(false).with_position([12000.0, 0.0]);
     let options = eframe::NativeOptions {
         viewport,
         ..Default::default()

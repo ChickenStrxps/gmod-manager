@@ -23,20 +23,20 @@ SEEDED = "https://steamcommunity.com/sharedfiles/filedetails/?id=2798594136"
 IMPORTED = "https://steamcommunity.com/sharedfiles/filedetails/?id=2185604753"
 
 # Where things sit, in egui points at the capture size (negative = from right/bottom).
-IMPORT = (172, 76)
-PRESET = [(116, 126), (116, 176), (116, 226)]  # built-in first, then in order of import
-TAB_MODS, TAB_BINDS, TAB_SETTINGS = (281, 119), (355, 119), (443, 119)
-ADD_MODS = (-79, 165)
-DONE = (-58, 165)
-SEARCH_BOX = (500, 205)
-RESULT_ROWS = [264, 311, 355, 402]
+IMPORT = (173, 122)
+PRESET = [(116, 169), (116, 219), (116, 269)]  # built-in first, then in order of import
+TAB_MODS, TAB_BINDS, TAB_SETTINGS = (278, 194), (363, 194), (445, 194)
+ADD_MODS = (-81, 242)
+DONE = (-57, 242)
+SEARCH_BOX = (500, 296)
+RESULT_ROWS = [355, 402, 446, 493]
 RESULT_ADD_X = -87
-PLAY = (-132, 53)
-MORE = (-46, 53)
-UNDO_ITEM = (-173, 154)
-LIBRARY_NAV = (40, -148)
+PLAY = (-156, 137)
+MORE = (-68, 137)
+UNDO_ITEM = (-197, 236)
+LIBRARY_NAV = (40, -150)
 LIBRARY_TOGGLE = (278, 112)
-LIST = (640, 330)
+LIST = (640, 450)
 IMPORT_BUTTON = (-157, 51.5)  # from the window centre
 
 

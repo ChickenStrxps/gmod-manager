@@ -171,4 +171,7 @@ pub struct LocalState {
     /// Empty means `library/` beside the app.
     #[serde(default)]
     pub library_path: String,
+    /// Show the Mods tab as thumbnail cards instead of a list.
+    #[serde(default)]
+    pub mods_grid: bool,
 }
