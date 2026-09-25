@@ -53,7 +53,12 @@ pub fn community_page(agent: &ureq::Agent, url: &str) -> Result<String, String> 
         let curl =
             PathBuf::from(std::env::var_os("SystemRoot").unwrap_or_else(|| "C:\\Windows".into()))
                 .join("System32/curl.exe");
-        let output = std::process::Command::new(curl)
+        let mut command = std::process::Command::new(curl);
+        use std::os::windows::process::CommandExt;
+        // curl.exe is a console program; don't flash a terminal for each author or dependency.
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        command.creation_flags(CREATE_NO_WINDOW);
+        let output = command
             .args([
                 "--fail",
                 "--silent",
