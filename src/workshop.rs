@@ -136,19 +136,30 @@ fn parse_required_items(html: &str) -> Vec<String> {
     ids
 }
 
-fn requirements_path(dir: &Path) -> PathBuf {
-    dir.join("cache").join("requirements.json")
+fn requirements_path(dir: &Path, source: crate::model::DependencySource) -> PathBuf {
+    let file = match source {
+        crate::model::DependencySource::Steam => "requirements-steam.json",
+        crate::model::DependencySource::WebPages => "requirements.json",
+    };
+    dir.join("cache").join(file)
 }
 
-fn load_requirements(dir: &Path) -> HashMap<String, Vec<String>> {
-    fs::read(requirements_path(dir))
+fn load_requirements(
+    dir: &Path,
+    source: crate::model::DependencySource,
+) -> HashMap<String, Vec<String>> {
+    fs::read(requirements_path(dir, source))
         .ok()
         .and_then(|bytes| serde_json::from_slice(&bytes).ok())
         .unwrap_or_default()
 }
 
-fn save_requirements(dir: &Path, cache: &HashMap<String, Vec<String>>) -> Result<(), String> {
-    let path = requirements_path(dir);
+fn save_requirements(
+    dir: &Path,
+    source: crate::model::DependencySource,
+    cache: &HashMap<String, Vec<String>>,
+) -> Result<(), String> {
+    let path = requirements_path(dir, source);
     fs::create_dir_all(path.parent().unwrap()).map_err(|e| e.to_string())?;
     let temp = path.with_extension("json.tmp");
     fs::write(&temp, serde_json::to_vec(cache).map_err(|e| e.to_string())?)
@@ -211,28 +222,108 @@ fn collect_requirements(
     Ok((added, warning))
 }
 
+/// Check a breadth-first wave in batches; cache only complete successful Steam replies.
+/// A failed query leaves its batch unchecked so another press can resume.
+fn collect_steam_requirements(
+    roots: &[String],
+    cache: &mut HashMap<String, Vec<String>>,
+    mut fetch: impl FnMut(&[String]) -> Result<HashMap<String, Vec<String>>, String>,
+    mut saved: impl FnMut(&HashMap<String, Vec<String>>) -> Result<(), String>,
+    mut progress: impl FnMut(usize, usize),
+) -> Result<(Vec<String>, Option<String>), String> {
+    let mut seen: HashSet<String> = roots.iter().cloned().collect();
+    let mut queue: VecDeque<String> = roots.iter().cloned().collect();
+    let mut added = Vec::new();
+    let mut checked = 0;
+    while !queue.is_empty() {
+        let wave: Vec<String> = queue.drain(..).collect();
+        for chunk in wave.chunks(100) {
+            let pending: Vec<String> = chunk
+                .iter()
+                .filter(|id| !cache.contains_key(*id))
+                .cloned()
+                .collect();
+            if !pending.is_empty() {
+                let rows = match fetch(&pending) {
+                    Ok(rows) => rows,
+                    Err(error) => {
+                        return Ok((
+                            added,
+                            Some(format!(
+                                "Steam dependency check paused: {error}. Switch to Workshop pages in Settings if Steam queries keep failing."
+                            )),
+                        ));
+                    }
+                };
+                if rows.len() != pending.len() || pending.iter().any(|id| !rows.contains_key(id)) {
+                    return Err("Steam returned incomplete dependency results; nothing from that batch was saved.".into());
+                }
+                cache.extend(rows);
+                saved(cache)?;
+            }
+            for id in chunk {
+                for child in &cache[id] {
+                    if seen.insert(child.clone()) {
+                        if seen.len() > 500 {
+                            return Err("This preset has too many required mods to check.".into());
+                        }
+                        queue.push_back(child.clone());
+                        added.push(child.clone());
+                    }
+                }
+                checked += 1;
+                progress(checked, seen.len());
+            }
+        }
+    }
+    Ok((added, None))
+}
+
 /// Check old and new preset mods alike. Missing mods are returned for the caller to save;
 /// Steam installs them on Play through the existing apply path.
 pub fn preset_requirements(
     dir: &Path,
+    game: Option<&Path>,
     roots: &[String],
+    source: crate::model::DependencySource,
     progress: impl FnMut(usize, usize),
 ) -> Result<(Vec<String>, HashMap<String, ItemMeta>, Option<String>), String> {
-    let agent = agent();
-    let mut cache = load_requirements(dir);
-    let (missing, warning) = collect_requirements(
-        roots,
-        &mut cache,
-        |id| {
-            community_page_with_timeout(
-                &agent,
-                &format!("https://steamcommunity.com/sharedfiles/filedetails/?id={id}"),
-                8,
-            )
-        },
-        |cache| save_requirements(dir, cache),
-        progress,
-    )?;
+    let mut cache = load_requirements(dir, source);
+    let (missing, warning) = match source {
+        crate::model::DependencySource::Steam => {
+            let mut query = None;
+            collect_steam_requirements(
+                roots,
+                &mut cache,
+                |ids| {
+                    if query.is_none() {
+                        let game =
+                            game.ok_or("Set your GMod folder before using Steam queries.")?;
+                        query = Some(crate::steam_query::SteamQuery::open(dir, game)?);
+                    }
+                    query.as_mut().expect("Steam query initialized").fetch(ids)
+                },
+                |cache| save_requirements(dir, source, cache),
+                progress,
+            )?
+        }
+        crate::model::DependencySource::WebPages => {
+            let agent = agent();
+            collect_requirements(
+                roots,
+                &mut cache,
+                |id| {
+                    community_page_with_timeout(
+                        &agent,
+                        &format!("https://steamcommunity.com/sharedfiles/filedetails/?id={id}"),
+                        8,
+                    )
+                },
+                |cache| save_requirements(dir, source, cache),
+                progress,
+            )?
+        }
+    };
     let meta = dependency_meta(&missing)?;
     Ok((missing, meta, warning))
 }
@@ -523,7 +614,7 @@ mod tests {
     fn rate_limit_keeps_verified_dependencies_and_resumes_without_refetching() {
         let roots = vec!["10".into(), "30".into()];
         let temp = tempfile::tempdir().unwrap();
-        let mut cache = load_requirements(temp.path());
+        let mut cache = load_requirements(temp.path(), crate::model::DependencySource::WebPages);
         let mut fetched = Vec::new();
         let (partial, warning) = collect_requirements(
             &roots,
@@ -536,7 +627,7 @@ mod tests {
                     Ok(r#"<div id="RequiredItems"><a href="https://steamcommunity.com/workshop/filedetails/?id=20"></a></div><!-- created by -->"#.into())
                 }
             },
-            |cache| save_requirements(temp.path(), cache),
+            |cache| save_requirements(temp.path(), crate::model::DependencySource::WebPages, cache),
             |_, _| {},
         )
         .unwrap();
@@ -545,7 +636,7 @@ mod tests {
         assert_eq!(fetched, ["10", "30"]);
         assert!(cache.contains_key("10"));
         assert!(!cache.contains_key("30"));
-        let mut cache = load_requirements(temp.path());
+        let mut cache = load_requirements(temp.path(), crate::model::DependencySource::WebPages);
         let (complete, warning) = collect_requirements(
             &roots,
             &mut cache,
@@ -553,7 +644,7 @@ mod tests {
                 fetched.push(id.to_owned());
                 Ok("<div>No required items</div>".into())
             },
-            |cache| save_requirements(temp.path(), cache),
+            |cache| save_requirements(temp.path(), crate::model::DependencySource::WebPages, cache),
             |_, _| {},
         )
         .unwrap();
@@ -626,5 +717,50 @@ mod tests {
         .unwrap();
         assert!(warning.is_none());
         assert_eq!(fetched.len(), 12);
+    }
+    #[test]
+    fn steam_batches_dependencies_and_resumes_after_failed_batch() {
+        let roots = vec!["10".into(), "20".into()];
+        let temp = tempfile::tempdir().unwrap();
+        let mut cache = load_requirements(temp.path(), crate::model::DependencySource::Steam);
+        let mut calls = Vec::new();
+        let (partial, warning) = collect_steam_requirements(
+            &roots,
+            &mut cache,
+            |ids| {
+                calls.push(ids.to_vec());
+                if ids == ["30"] {
+                    return Err("Steam unavailable".into());
+                }
+                Ok(HashMap::from([
+                    ("10".into(), vec!["20".into(), "30".into()]),
+                    ("20".into(), vec!["30".into()]),
+                ]))
+            },
+            |cache| save_requirements(temp.path(), crate::model::DependencySource::Steam, cache),
+            |_, _| {},
+        )
+        .unwrap();
+        assert_eq!(calls, [vec!["10", "20"], vec!["30"]]);
+        assert_eq!(partial, ["30"]);
+        assert!(warning.unwrap().contains("Steam unavailable"));
+        assert!(!cache.contains_key("30"));
+        let mut cache = load_requirements(temp.path(), crate::model::DependencySource::Steam);
+        let (complete, warning) = collect_steam_requirements(
+            &roots,
+            &mut cache,
+            |ids| {
+                Ok(match ids {
+                    [id] if id == "30" => HashMap::from([("30".into(), vec!["40".into()])]),
+                    [id] if id == "40" => HashMap::from([("40".into(), vec![])]),
+                    _ => panic!("unexpected batch: {ids:?}"),
+                })
+            },
+            |cache| save_requirements(temp.path(), crate::model::DependencySource::Steam, cache),
+            |_, _| {},
+        )
+        .unwrap();
+        assert_eq!(complete, ["30", "40"]);
+        assert!(warning.is_none());
     }
 }

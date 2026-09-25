@@ -158,6 +158,14 @@ impl Profile {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum DependencySource {
+    #[default]
+    Steam,
+    WebPages,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct LocalState {
@@ -174,4 +182,28 @@ pub struct LocalState {
     /// Show the Mods tab as thumbnail cards instead of a list.
     #[serde(default)]
     pub mods_grid: bool,
+    /// How to retrieve Workshop dependencies. Older state files use Steam.
+    #[serde(default)]
+    pub dependency_source: DependencySource,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{DependencySource, LocalState};
+
+    #[test]
+    fn dependency_source_defaults_to_steam_and_persists_fallback() {
+        let old_state: LocalState =
+            serde_json::from_str(r#"{"gamePath":"C:\\GarrysMod"}"#).unwrap();
+        assert_eq!(old_state.dependency_source, DependencySource::Steam);
+        let mut state = old_state;
+        state.dependency_source = DependencySource::WebPages;
+        let saved = serde_json::to_string(&state).unwrap();
+        assert_eq!(
+            serde_json::from_str::<LocalState>(&saved)
+                .unwrap()
+                .dependency_source,
+            DependencySource::WebPages
+        );
+    }
 }

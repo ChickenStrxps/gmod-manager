@@ -1,0 +1,8 @@
+[package]
+name = "gmm-steam-query"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+steamworks = "0.13.1"
+serde_json = "1"

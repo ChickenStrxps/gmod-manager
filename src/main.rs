@@ -5,11 +5,14 @@ mod library;
 mod model;
 #[cfg(feature = "promo")]
 mod promo;
+mod steam_query;
 mod update;
 mod workshop;
 
 use crate::library::{Library, LibraryEntry, SteamCopy};
-use crate::model::{Bind, FileMapping, LocalState, Profile, Setting, WorkshopItem};
+use crate::model::{
+    Bind, DependencySource, FileMapping, LocalState, Profile, Setting, WorkshopItem,
+};
 use crate::workshop::{ItemMeta, format_size};
 use eframe::egui::{
     self, Align, Align2, Color32, CornerRadius, FontData, FontFamily, FontId, Frame, Id, Layout,
@@ -1071,14 +1074,22 @@ impl App {
             return;
         }
         self.requirements_error = None;
+        let source = self.state.dependency_source;
+        let game = self.game();
         let dir = self.dir.clone();
         let (tx, rx) = mpsc::channel();
         let repaint = ctx.clone();
         let scan_roots = roots.clone();
         std::thread::spawn(move || {
-            let result = workshop::preset_requirements(&dir, &scan_roots, |done, total| {
-                let _ = tx.send(RequirementsEvent::Progress(done, total));
-            });
+            let result = workshop::preset_requirements(
+                &dir,
+                game.as_deref(),
+                &scan_roots,
+                source,
+                |done, total| {
+                    let _ = tx.send(RequirementsEvent::Progress(done, total));
+                },
+            );
             let _ = tx.send(RequirementsEvent::Done(result));
             repaint.request_repaint();
         });
@@ -2326,9 +2337,11 @@ impl App {
                         !self.busy() && self.profile().sync.addons,
                         soft_button("Check required mods"),
                     )
-                    .on_hover_text(
-                        "Check up to 10 uncached Workshop pages per press. Successful results are saved; press again to continue. Steam may temporarily rate-limit requests.",
-                    )
+                    .on_hover_text(if self.state.dependency_source == DependencySource::Steam {
+                        "Ask your installed Steam client for required mods in batches. Needs Steam and GMod; successful results are cached."
+                    } else {
+                        "Read Workshop pages, up to 10 uncached pages per press. Results are cached; Steam may rate-limit requests."
+                    })
                     .clicked()
                 {
                     self.start_requirements(ctx);
@@ -3407,6 +3420,34 @@ impl App {
                 .color(MUTED),
             );
         });
+        ui.add_space(22.0);
+        ui.label(semibold("Required mods", 15.0));
+        ui.add_space(4.0);
+        ui.label(
+            RichText::new("Choose how Check required mods finds dependencies.")
+                .size(12.0)
+                .color(MUTED),
+        );
+        let mut source = self.state.dependency_source;
+        let changed = ui
+            .radio_value(&mut source, DependencySource::Steam, "Steam (faster)")
+            .changed()
+            | ui.radio_value(
+                &mut source,
+                DependencySource::WebPages,
+                "Workshop pages (fallback)",
+            )
+            .changed();
+        if changed {
+            self.state.dependency_source = source;
+            let _ = core::save_state(&self.dir, &self.state);
+            self.requirements_error = None;
+        }
+        ui.label(RichText::new(if source == DependencySource::Steam {
+            "Queries Steam in batches using GMod's installed Steam runtime. Steam must be running."
+        } else {
+            "Checks pages individually. Use this if Steam queries fail; Steam may limit page requests."
+        }).size(12.0).color(MUTED));
         ui.add_space(22.0);
         ui.label(semibold("Undo", 15.0));
         ui.add_space(4.0);
