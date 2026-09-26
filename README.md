@@ -2,44 +2,23 @@
 
 Manage Garry's Mod modpacks. Pick a preset, hit Play.
 
-## Preview
-
-[![Finding mods as you type in GMod Manager](assets/intro-preview.gif)](assets/gmod-manager-intro.mp4)
-
-Watch the [full intro video](assets/gmod-manager-intro.mp4) (about a minute, with sound).
+![GMod Manager: find mods, manage presets and your compressed library](assets/intro-preview.gif)
 
 ## Install
 
 1. Download `GModManager-Windows.zip` from the [latest release](https://github.com/ChickenStrxps/gmod-manager/releases/latest).
 2. Unzip it anywhere and run `gmod-manager.exe`.
 
-You need Steam and Garry's Mod installed. The app updates itself.
+Steam and Garry's Mod must be installed. The app can update itself from **Settings → Check for updates**.
 
-## Use
+## Get started
 
-- **Play** applies the preset and starts GMod. Missing Workshop mods download after GMod opens; stay on its main menu until **Addons → GMod Manager** shows no mods “not ready.” The Mods tab in this app reports how many Workshop copies GMod has mounted (library copies are separate). If you entered a map while downloads were still finishing, restart the map to load newly available scripts and models.
-- **Mods** – find mods on the Workshop, see their authors and sizes. Results update as you type. Switch between **List** and **Grid**, and use the status chips (installed, in library, to download, removed) to narrow the list. Discovery saves a mod to the preset immediately. **Check required mods** now asks your running Steam client for dependencies in batches using GMod's installed Steam runtime. Successful checks are cached, including nested dependencies. If Steam queries fail, use **Settings → Required mods → Workshop pages (fallback)** to use the older page-by-page scanner. That mode checks up to 10 uncached pages per press and may get HTTP 429; successful pages and discovered mods are saved for the next press. Both modes run only when you press the button.
-- **Binds / Settings** – keybinds and console settings that come with the preset.
-- **Import** – paste a public Garry's Mod Steam collection link or ID to create a preset with its mods; use **Details → Update mods from collection** to refresh it. Or choose a shared preset ZIP/JSON.
-- **… → Share as file** – send a preset ZIP to a friend; they open it through **Import**.
-- **… → Undo last apply** – puts your GMod files back.
-- **Ctrl+K** (or **Search** in the sidebar) – jump to a preset, tab or action like Play, Review or Share from the keyboard.
+Pick a preset or import a public Steam Workshop collection, then click **Play**. Missing mods download after Garry's Mod starts; stay on its main menu until **Addons → GMod Manager** shows none “not ready.” If you joined a map before downloads finished, restart the map to load the new mods.
 
-## Library
+## Features
 
-Turn it on in **Library**. It keeps a compressed copy of every mod, so switching presets doesn't mean downloading everything again. Mods you aren't using get removed from Steam, and they come back from the library when you need them. New copies under 64 MB use stronger compression; saving them can take longer. **Optimize stored mods** can shrink older library copies without downloading them again and only replaces an archive if the result is smaller. Larger mods keep the faster compression mode to limit memory and CPU use. Compression is lossless: restored mod files are unchanged. Savings vary, especially for mods made mostly of already-compressed media; the app reports the space saved when optimization finishes.
-
-In GMod, these mods show up under **Addons → GMod Manager** instead of **Subscribed**.
-
-In the spawn menu, **Entities** only shows entity addons. Look under **Weapons** for weapons and **Browse → Addons** for models and spawnlists; an addon does not necessarily add anything to Entities.
-
-When addon syncing is on, **Play** also installs a small client-side spawn-menu fallback. Existing weapon and entity icons stay unchanged. If an addon supplies no icon under its class name, GMod Manager tries a related icon, then its model, then a standard category symbol; this does not repair missing game models or textures. Re-apply and restart GMod after updating the manager to load this change.
-
-## Building
-
-```powershell
-cargo test
-.\build.ps1
-```
-
-To publish an update, bump `version` in `Cargo.toml`, commit, and run `.\release.ps1`.
+- **Find mods** by searching the Workshop. See authors, sizes and whether each mod is installed, in your library or waiting to download. Switch between list and grid views.
+- **Check required mods** from Steam in batches. If Steam queries fail, switch to **Settings → Required mods → Workshop pages (fallback)**.
+- **Switch presets without downloading everything again.** Enable **Library** to keep compressed copies of your mods. Use **Optimize stored mods** to shrink older copies; compression is lossless, and the app keeps the original if it cannot make it smaller.
+- **Customize and share presets.** Add keybinds and settings, import Workshop collections or preset ZIP/JSON files, and share a preset with **… → Share as file**.
+- **Undo last apply** from the preset menu to restore the GMod files it changed.
